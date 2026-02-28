@@ -77,6 +77,11 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.panes[msg.Index].SyncFromBuffer()
 		}
 		return m, nil
+
+	case process.HealthCheckMsg:
+		// Health state is already updated in the Service struct.
+		// Just trigger a re-render.
+		return m, nil
 	}
 
 	return m, nil
@@ -225,11 +230,17 @@ func (m DashboardModel) renderHeader() string {
 		var dot string
 		switch svc.Status {
 		case process.StatusRunning:
-			dot = lipgloss.NewStyle().Foreground(color).Render("●")
+			if svc.Config.Healthcheck != "" && !svc.Healthy {
+				dot = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("◐")
+			} else {
+				dot = lipgloss.NewStyle().Foreground(color).Render("●")
+			}
 		case process.StatusCrashed:
 			dot = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render("●")
 		case process.StatusStarting:
 			dot = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("○")
+		case process.StatusWaiting:
+			dot = lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Render("○")
 		default:
 			dot = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("○")
 		}

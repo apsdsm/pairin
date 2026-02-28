@@ -84,6 +84,8 @@ func (p *Pane) titleLine(active bool) string {
 		statusStyle = StatusCrashed
 	case process.StatusStarting:
 		statusStyle = StatusStarting
+	case process.StatusWaiting:
+		statusStyle = StatusWaitingStyle
 	default:
 		statusStyle = StatusStopped
 	}
@@ -92,6 +94,15 @@ func (p *Pane) titleLine(active bool) string {
 		nameStyle.Render(svc.Config.Name),
 		DimStyle.Render(svc.Branch),
 		statusStyle.Render(svc.Status.String()),
+	}
+
+	// Show health indicator for running services with a healthcheck
+	if svc.Status == process.StatusRunning && svc.Config.Healthcheck != "" {
+		if svc.Healthy {
+			parts = append(parts, StatusHealthy.Render("healthy"))
+		} else {
+			parts = append(parts, StatusUnhealthy.Render("unhealthy"))
+		}
 	}
 
 	if svc.PID > 0 {

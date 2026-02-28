@@ -2,8 +2,11 @@ package process
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os/exec"
 	"strings"
 	"sync"
@@ -18,6 +21,7 @@ type Status int
 
 const (
 	StatusStopped Status = iota
+	StatusWaiting
 	StatusStarting
 	StatusRunning
 	StatusCrashed
@@ -27,6 +31,8 @@ func (s Status) String() string {
 	switch s {
 	case StatusStopped:
 		return "stopped"
+	case StatusWaiting:
+		return "waiting"
 	case StatusStarting:
 		return "starting"
 	case StatusRunning:
@@ -80,10 +86,12 @@ type Service struct {
 	PID    int
 	Branch string
 	Logs   *RingBuffer
+	Healthy bool
 
-	cmd        *exec.Cmd
-	generation int
-	mu         sync.Mutex
+	cmd          *exec.Cmd
+	generation   int
+	healthCancel context.CancelFunc
+	mu           sync.Mutex
 }
 
 // GetLines returns a copy of the log lines (thread-safe).
@@ -95,22 +103,25 @@ func (s *Service) GetLines() []string {
 
 // Manager orchestrates all services.
 type Manager struct {
-	Services []*Service
-	program  *tea.Program
-	mu       sync.Mutex
-	err      error
+	Services  []*Service
+	nameToIdx map[string]int
+	program   *tea.Program
+	mu        sync.Mutex
+	err       error
 }
 
 func NewManager(cfg *config.Config) *Manager {
 	services := make([]*Service, len(cfg.Services))
+	nameToIdx := make(map[string]int, len(cfg.Services))
 	for i, sc := range cfg.Services {
 		services[i] = &Service{
 			Config: sc,
 			Status: StatusStopped,
 			Logs:   NewRingBuffer(ringBufferSize),
 		}
+		nameToIdx[sc.Name] = i
 	}
-	return &Manager{Services: services}
+	return &Manager{Services: services, nameToIdx: nameToIdx}
 }
 
 func (m *Manager) SetProgram(p *tea.Program) {
@@ -134,11 +145,21 @@ func (m *Manager) send(msg tea.Msg) {
 	}
 }
 
-// StartAll launches all services. Returns a tea.Cmd for use in Init().
+// StartAll launches all services. Services with unmet dependencies enter
+// StatusWaiting and are started automatically once their deps become healthy.
 func (m *Manager) StartAll() tea.Cmd {
 	return func() tea.Msg {
-		for i := range m.Services {
-			m.startService(i)
+		for i, svc := range m.Services {
+			if len(svc.Config.DependsOn) == 0 || m.allDepsHealthy(i) {
+				m.startService(i)
+			} else {
+				svc.mu.Lock()
+				svc.Status = StatusWaiting
+				deps := strings.Join(svc.Config.DependsOn, ", ")
+				svc.Logs.Add(fmt.Sprintf("[pairin] waiting for dependencies: %s", deps))
+				svc.mu.Unlock()
+				m.send(StatusMsg{Index: i, Status: StatusWaiting})
+			}
 		}
 		return AllStartedMsg{}
 	}
@@ -189,6 +210,11 @@ func (m *Manager) startService(idx int) {
 	// Wait for process to exit in background
 	gen := svc.generation
 	go m.waitForExit(idx, cmd, gen)
+
+	// Start healthcheck poller if configured
+	if svc.Config.Healthcheck != "" {
+		m.startHealthcheckPoller(idx)
+	}
 }
 
 func (m *Manager) captureOutput(idx int, r io.Reader) {
@@ -239,6 +265,13 @@ func (m *Manager) waitForExit(idx int, cmd *exec.Cmd, gen int) {
 func (m *Manager) RestartService(idx int) tea.Cmd {
 	return func() tea.Msg {
 		m.stopService(idx)
+
+		svc := m.Services[idx]
+		svc.mu.Lock()
+		svc.Healthy = false
+		svc.mu.Unlock()
+		m.send(HealthCheckMsg{Index: idx, Healthy: false})
+
 		m.startService(idx)
 		return ServiceRestartedMsg{Index: idx}
 	}
@@ -248,6 +281,13 @@ func (m *Manager) stopService(idx int) {
 	svc := m.Services[idx]
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
+
+	// Cancel healthcheck poller
+	if svc.healthCancel != nil {
+		svc.healthCancel()
+		svc.healthCancel = nil
+	}
+	svc.Healthy = false
 
 	if svc.cmd == nil || svc.cmd.Process == nil {
 		return
@@ -319,4 +359,114 @@ type AllStartedMsg struct{}
 
 type ServiceRestartedMsg struct {
 	Index int
+}
+
+type HealthCheckMsg struct {
+	Index   int
+	Healthy bool
+}
+
+// checkTCP dials a TCP address with a 1-second timeout.
+func checkTCP(addr string) bool {
+	conn, err := net.DialTimeout("tcp", addr, 1*time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
+// checkHTTP sends a GET request with a 2-second timeout, expects 2xx.
+func checkHTTP(url string) bool {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+// runHealthcheck dispatches to the appropriate checker based on URL scheme.
+func runHealthcheck(hc string) bool {
+	switch {
+	case strings.HasPrefix(hc, "tcp://"):
+		return checkTCP(strings.TrimPrefix(hc, "tcp://"))
+	case strings.HasPrefix(hc, "http://"), strings.HasPrefix(hc, "https://"):
+		return checkHTTP(hc)
+	default:
+		return false
+	}
+}
+
+// startHealthcheckPoller starts a goroutine that polls the service's
+// healthcheck every 2 seconds. It sends HealthCheckMsg on state changes
+// and triggers waiting dependents when the service becomes healthy.
+func (m *Manager) startHealthcheckPoller(idx int) {
+	svc := m.Services[idx]
+	// svc.mu must be held by the caller (startService holds it)
+	ctx, cancel := context.WithCancel(context.Background())
+	svc.healthCancel = cancel
+	gen := svc.generation
+	hc := svc.Config.Healthcheck
+
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				healthy := runHealthcheck(hc)
+
+				svc.mu.Lock()
+				if svc.generation != gen {
+					svc.mu.Unlock()
+					return
+				}
+				changed := healthy != svc.Healthy
+				svc.Healthy = healthy
+				svc.mu.Unlock()
+
+				if changed {
+					m.send(HealthCheckMsg{Index: idx, Healthy: healthy})
+					if healthy {
+						m.tryStartWaiting()
+					}
+				}
+			}
+		}
+	}()
+}
+
+// allDepsHealthy returns true if all dependencies of the service at idx are healthy.
+func (m *Manager) allDepsHealthy(idx int) bool {
+	svc := m.Services[idx]
+	for _, depName := range svc.Config.DependsOn {
+		depIdx := m.nameToIdx[depName]
+		dep := m.Services[depIdx]
+		dep.mu.Lock()
+		healthy := dep.Healthy
+		dep.mu.Unlock()
+		if !healthy {
+			return false
+		}
+	}
+	return true
+}
+
+// tryStartWaiting iterates services in StatusWaiting and starts any whose
+// dependencies are now all healthy.
+func (m *Manager) tryStartWaiting() {
+	for i, svc := range m.Services {
+		svc.mu.Lock()
+		waiting := svc.Status == StatusWaiting
+		svc.mu.Unlock()
+
+		if waiting && m.allDepsHealthy(i) {
+			m.startService(i)
+		}
+	}
 }
