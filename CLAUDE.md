@@ -19,8 +19,8 @@ go test ./...               # Run tests
 main.go                        # Entry point
 cmd/root.go                    # Cobra root command, wires config -> manager -> TUI
 internal/
-  config/config.go             # TOML config loading (.pairinrc.toml), directory resolution
-  process/manager.go           # Process lifecycle (start/stop/restart), log capture, message types
+  config/config.go             # TOML config loading (.pairinrc.toml), directory resolution, dependency validation
+  process/manager.go           # Process lifecycle (start/stop/restart), log capture, healthcheck polling, dependency-aware startup
   tui/
     model.go                   # Bubble Tea model: keyboard handling, layout, split/focus views
     pane.go                    # Single service pane: viewport, title bar, log rendering
@@ -38,10 +38,32 @@ main.go -> cmd.Execute() -> config.Load() -> process.NewManager() -> tui.NewDash
                                           Sends LogMsg/StatusMsg to TUI via tea.Program
 ```
 
-- **config** - Loads `.pairinrc.toml`, resolves relative service directories against config file location. Searches from cwd up to filesystem root.
-- **process.Manager** - Owns all `Service` structs. Each service runs in its own process group (`Setpgid`). Logs are stored in a fixed-size ring buffer (1000 lines). Sends Bubble Tea messages (`LogMsg`, `StatusMsg`, `AllStartedMsg`, `ServiceRestartedMsg`) to drive the TUI.
+- **config** - Loads `.pairinrc.toml`, resolves relative service directories against config file location. Searches from cwd up to filesystem root. Validates dependency references, ensures depended-on services have healthchecks, and detects circular dependencies (Kahn's algorithm).
+- **process.Manager** - Owns all `Service` structs. Each service runs in its own process group (`Setpgid`). Logs are stored in a fixed-size ring buffer (1000 lines). Sends Bubble Tea messages (`LogMsg`, `StatusMsg`, `AllStartedMsg`, `ServiceRestartedMsg`, `HealthCheckMsg`) to drive the TUI. Services with `depends_on` enter `StatusWaiting` until their dependencies pass healthchecks. Healthcheck polling (TCP dial or HTTP GET) runs every 2 seconds per service.
 - **tui.DashboardModel** - Bubble Tea model with two view modes: split (all panes) and focus (single pane full-screen). Handles keyboard input for navigation, restart, and scrolling.
-- **tui.Pane** - Wraps a `bubbles/viewport` for scrollable log display with a title bar showing service name, git branch, status, and PID.
+- **tui.Pane** - Wraps a `bubbles/viewport` for scrollable log display with a title bar showing service name, git branch, status, health indicator, and PID.
+
+## Service Dependencies & Healthchecks
+
+Services can declare dependencies and healthchecks in `.pairinrc.toml`:
+
+```toml
+[[services]]
+name = "database"
+cmd = "docker compose up postgres"
+healthcheck = "tcp://localhost:5432"
+
+[[services]]
+name = "web"
+cmd = "bun run dev"
+depends_on = ["database"]
+```
+
+- **`healthcheck`** - `tcp://host:port` (1s dial timeout) or `http(s)://url` (2s GET, expects 2xx)
+- **`depends_on`** - list of service names that must be healthy before this service starts
+- Services with unmet deps enter `StatusWaiting` (magenta) and auto-start when deps become healthy
+- Healthcheck is orthogonal to status: a service can be `Running` but not yet `Healthy`
+- No cascade restarts — restarting a dependency doesn't auto-restart dependents
 
 ## Key Design Decisions
 
@@ -49,6 +71,7 @@ main.go -> cmd.Execute() -> config.Load() -> process.NewManager() -> tui.NewDash
 - SIGINT with 5-second timeout before SIGKILL for graceful shutdown
 - Generation counter on Service prevents stale goroutines from updating state after a restart
 - Ring buffer avoids unbounded memory growth from long-running services
+- Healthcheck poller uses the same generation guard to prevent stale goroutines after restart
 
 ## Dependencies
 
