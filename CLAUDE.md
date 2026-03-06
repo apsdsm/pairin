@@ -73,6 +73,13 @@ depends_on = ["database"]
 - Ring buffer avoids unbounded memory growth from long-running services
 - Healthcheck poller uses the same generation guard to prevent stale goroutines after restart
 
+## Versioning
+
+The version is defined as a `const` in `cmd/version.go`. When bumping the version:
+1. Update the `Version` constant in `cmd/version.go`
+2. Create a git tag matching the version (e.g. `git tag v0.1.0`)
+3. Push the tag (e.g. `git push origin v0.1.0`)
+
 ## Dependencies
 
 - `charmbracelet/bubbletea` - TUI framework
