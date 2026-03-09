@@ -65,6 +65,27 @@ depends_on = ["database"]
 - Healthcheck is orthogonal to status: a service can be `Running` but not yet `Healthy`
 - No cascade restarts — restarting a dependency doesn't auto-restart dependents
 
+## Auto-Restart (systemd-style)
+
+Services can be configured to automatically restart when they exit:
+
+```toml
+[[services]]
+name = "web"
+cmd = "bun run dev"
+restart = "on-failure"
+restart_delay = "5s"
+max_restarts = 5
+```
+
+- **`restart`** - restart policy: `"no"` (default), `"always"`, `"on-failure"`, `"on-success"` — mirrors systemd's `Restart=` directive
+- **`restart_delay`** - Go duration string (e.g. `"5s"`, `"500ms"`), cooldown before retrying (default: `"3s"`)
+- **`max_restarts`** - maximum number of consecutive auto-restarts before giving up; `0` = unlimited (default: `0`)
+- During the cooldown, the service enters `StatusRestarting` (yellow) in the TUI
+- The title bar shows restart count (e.g. `restarting 3/5` or `restarting #3`)
+- Manual restart (`r` key) resets the restart counter
+- Intentional stops (via `stopService`) do not trigger auto-restart
+
 ## Key Design Decisions
 
 - Process groups (`Setpgid`) ensure child processes of services are also cleaned up on stop
@@ -72,6 +93,7 @@ depends_on = ["database"]
 - Generation counter on Service prevents stale goroutines from updating state after a restart
 - Ring buffer avoids unbounded memory growth from long-running services
 - Healthcheck poller uses the same generation guard to prevent stale goroutines after restart
+- Auto-restart uses the same generation guard — if a manual restart or stop happens during the cooldown sleep, the stale auto-restart goroutine exits without acting
 
 ## Versioning
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -18,13 +19,45 @@ type Project struct {
 }
 
 type Service struct {
-	Name        string   `toml:"name"`
-	Short       string   `toml:"short"`
-	Dir         string   `toml:"dir"`
-	Cmd         string   `toml:"cmd"`
-	Color       string   `toml:"color"`
-	Healthcheck string   `toml:"healthcheck"`
-	DependsOn   []string `toml:"depends_on"`
+	Name         string   `toml:"name"`
+	Short        string   `toml:"short"`
+	Dir          string   `toml:"dir"`
+	Cmd          string   `toml:"cmd"`
+	Color        string   `toml:"color"`
+	Healthcheck  string   `toml:"healthcheck"`
+	DependsOn    []string `toml:"depends_on"`
+	Restart      string   `toml:"restart"`       // "no" (default), "always", "on-failure", "on-success"
+	RestartDelay string   `toml:"restart_delay"`  // duration string, e.g. "5s" (default: "3s")
+	MaxRestarts  int      `toml:"max_restarts"`   // 0 = unlimited
+}
+
+// ParsedRestartDelay returns the restart delay as a time.Duration.
+// Defaults to 3s if not set or invalid.
+func (s *Service) ParsedRestartDelay() time.Duration {
+	if s.RestartDelay == "" {
+		return 3 * time.Second
+	}
+	d, err := time.ParseDuration(s.RestartDelay)
+	if err != nil {
+		return 3 * time.Second
+	}
+	return d
+}
+
+// RestartPolicy returns the normalized restart policy.
+// Defaults to "no" if not set.
+func (s *Service) RestartPolicy() string {
+	if s.Restart == "" {
+		return "no"
+	}
+	return s.Restart
+}
+
+var validRestartPolicies = map[string]bool{
+	"no":         true,
+	"always":     true,
+	"on-failure": true,
+	"on-success": true,
 }
 
 const configFileName = ".pairinrc.toml"
@@ -80,6 +113,23 @@ func (cfg *Config) Validate() error {
 			if cfg.Services[depIdx].Healthcheck == "" {
 				return fmt.Errorf("service %q depends on %q, but %q has no healthcheck", svc.Name, dep, dep)
 			}
+		}
+
+		// Validate restart policy
+		if svc.Restart != "" && !validRestartPolicies[svc.Restart] {
+			return fmt.Errorf("service %q has invalid restart policy %q (must be no, always, on-failure, or on-success)", svc.Name, svc.Restart)
+		}
+
+		// Validate restart_delay is parseable
+		if svc.RestartDelay != "" {
+			if _, err := time.ParseDuration(svc.RestartDelay); err != nil {
+				return fmt.Errorf("service %q has invalid restart_delay %q: %w", svc.Name, svc.RestartDelay, err)
+			}
+		}
+
+		// Validate max_restarts is non-negative
+		if svc.MaxRestarts < 0 {
+			return fmt.Errorf("service %q has negative max_restarts %d", svc.Name, svc.MaxRestarts)
 		}
 	}
 

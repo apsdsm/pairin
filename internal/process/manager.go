@@ -25,6 +25,7 @@ const (
 	StatusStarting
 	StatusRunning
 	StatusCrashed
+	StatusRestarting
 )
 
 func (s Status) String() string {
@@ -39,6 +40,8 @@ func (s Status) String() string {
 		return "running"
 	case StatusCrashed:
 		return "crashed"
+	case StatusRestarting:
+		return "restarting"
 	default:
 		return "unknown"
 	}
@@ -81,12 +84,13 @@ func (rb *RingBuffer) Lines() []string {
 
 // Service represents a single managed subprocess.
 type Service struct {
-	Config config.Service
-	Status Status
-	PID    int
-	Branch string
-	Logs   *RingBuffer
+	Config  config.Service
+	Status  Status
+	PID     int
+	Branch  string
+	Logs    *RingBuffer
 	Healthy bool
+	RestartCount int // number of auto-restarts since last manual start/restart
 
 	cmd          *exec.Cmd
 	generation   int
@@ -236,14 +240,16 @@ func (m *Manager) waitForExit(idx int, cmd *exec.Cmd, gen int) {
 	err := cmd.Wait()
 
 	svc.mu.Lock()
-	defer svc.mu.Unlock()
 
 	// If a new process has been started since, this goroutine is stale.
 	if svc.generation != gen {
+		svc.mu.Unlock()
 		return
 	}
 
+	var exitedWithFailure bool
 	if err != nil {
+		exitedWithFailure = true
 		// Only mark as crashed if it wasn't intentionally stopped
 		if svc.Status == StatusRunning {
 			svc.Status = StatusCrashed
@@ -251,14 +257,95 @@ func (m *Manager) waitForExit(idx int, cmd *exec.Cmd, gen int) {
 			m.send(StatusMsg{Index: idx, Status: StatusCrashed})
 		}
 	} else {
+		exitedWithFailure = false
 		if svc.Status == StatusRunning {
 			svc.Status = StatusStopped
 			svc.Logs.Add("[pairin] process exited normally")
 			m.send(StatusMsg{Index: idx, Status: StatusStopped})
 		}
 	}
+
+	// Determine if we should auto-restart
+	shouldRestart := m.shouldAutoRestart(svc, exitedWithFailure)
 	svc.PID = 0
 	svc.cmd = nil
+	svc.mu.Unlock()
+
+	if shouldRestart {
+		m.autoRestartService(idx, gen)
+	}
+}
+
+// shouldAutoRestart checks whether a service should be automatically restarted.
+// Must be called with svc.mu held.
+func (m *Manager) shouldAutoRestart(svc *Service, exitedWithFailure bool) bool {
+	policy := svc.Config.RestartPolicy()
+	if policy == "no" {
+		return false
+	}
+
+	// Don't auto-restart if the service was intentionally stopped
+	if svc.Status != StatusCrashed && svc.Status != StatusStopped {
+		return false
+	}
+
+	// Check max_restarts limit
+	if svc.Config.MaxRestarts > 0 && svc.RestartCount >= svc.Config.MaxRestarts {
+		svc.Logs.Add(fmt.Sprintf("[pairin] max restarts reached (%d/%d)", svc.RestartCount, svc.Config.MaxRestarts))
+		return false
+	}
+
+	switch policy {
+	case "always":
+		return true
+	case "on-failure":
+		return exitedWithFailure
+	case "on-success":
+		return !exitedWithFailure
+	default:
+		return false
+	}
+}
+
+// autoRestartService handles the auto-restart flow: sets status to restarting,
+// waits for the cooldown delay, then restarts the service.
+func (m *Manager) autoRestartService(idx int, originalGen int) {
+	svc := m.Services[idx]
+	delay := svc.Config.ParsedRestartDelay()
+
+	svc.mu.Lock()
+	// Check generation hasn't changed (e.g., manual restart happened)
+	if svc.generation != originalGen {
+		svc.mu.Unlock()
+		return
+	}
+	svc.Status = StatusRestarting
+	svc.RestartCount++
+
+	var msg string
+	if svc.Config.MaxRestarts > 0 {
+		msg = fmt.Sprintf("[pairin] restarting in %s (%d/%d)...", delay, svc.RestartCount, svc.Config.MaxRestarts)
+	} else {
+		msg = fmt.Sprintf("[pairin] restarting in %s...", delay)
+	}
+	svc.Logs.Add(msg)
+	svc.mu.Unlock()
+
+	m.send(StatusMsg{Index: idx, Status: StatusRestarting})
+
+	time.Sleep(delay)
+
+	// Check generation again after sleep
+	svc.mu.Lock()
+	if svc.generation != originalGen {
+		svc.mu.Unlock()
+		return
+	}
+	svc.Healthy = false
+	svc.mu.Unlock()
+
+	m.send(HealthCheckMsg{Index: idx, Healthy: false})
+	m.startService(idx)
 }
 
 // RestartService stops and restarts a single service.
@@ -269,6 +356,7 @@ func (m *Manager) RestartService(idx int) tea.Cmd {
 		svc := m.Services[idx]
 		svc.mu.Lock()
 		svc.Healthy = false
+		svc.RestartCount = 0 // reset auto-restart counter on manual restart
 		svc.mu.Unlock()
 		m.send(HealthCheckMsg{Index: idx, Healthy: false})
 

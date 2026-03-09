@@ -239,6 +239,8 @@ func (m DashboardModel) renderHeader() string {
 			dot = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render("●")
 		case process.StatusStarting:
 			dot = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("○")
+		case process.StatusRestarting:
+			dot = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("◐")
 		case process.StatusWaiting:
 			dot = lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Render("○")
 		default:

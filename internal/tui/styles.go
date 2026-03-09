@@ -15,11 +15,12 @@ var (
 				Border(lipgloss.RoundedBorder()).
 				BorderForeground(lipgloss.Color("4"))
 
-	StatusRunning  = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true) // green
-	StatusCrashed  = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true) // red
-	StatusStopped  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))            // gray
-	StatusStarting = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))            // yellow
-	StatusWaitingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))        // magenta
+	StatusRunning      = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true) // green
+	StatusCrashed      = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true) // red
+	StatusStopped      = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))            // gray
+	StatusStarting     = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))            // yellow
+	StatusWaitingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))            // magenta
+	StatusRestarting   = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))            // yellow
 
 	StatusHealthy   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))          // green
 	StatusUnhealthy = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))          // yellow

@@ -86,14 +86,25 @@ func (p *Pane) titleLine(active bool) string {
 		statusStyle = StatusStarting
 	case process.StatusWaiting:
 		statusStyle = StatusWaitingStyle
+	case process.StatusRestarting:
+		statusStyle = StatusRestarting
 	default:
 		statusStyle = StatusStopped
+	}
+
+	statusText := svc.Status.String()
+	if svc.Status == process.StatusRestarting && svc.RestartCount > 0 {
+		if svc.Config.MaxRestarts > 0 {
+			statusText = fmt.Sprintf("restarting %d/%d", svc.RestartCount, svc.Config.MaxRestarts)
+		} else {
+			statusText = fmt.Sprintf("restarting #%d", svc.RestartCount)
+		}
 	}
 
 	parts := []string{
 		nameStyle.Render(svc.Config.Name),
 		DimStyle.Render(svc.Branch),
-		statusStyle.Render(svc.Status.String()),
+		statusStyle.Render(statusText),
 	}
 
 	// Show health indicator for running services with a healthcheck

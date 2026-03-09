@@ -91,6 +91,7 @@ func TestStatus_String(t *testing.T) {
 		{StatusStarting, "starting"},
 		{StatusRunning, "running"},
 		{StatusCrashed, "crashed"},
+		{StatusRestarting, "restarting"},
 		{Status(99), "unknown"},
 	}
 	for _, tc := range tests {
@@ -721,5 +722,213 @@ func TestDetectBranch_ValidGitRepo(t *testing.T) {
 	}
 	if branch == "" {
 		t.Error("expected non-empty branch name")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// shouldAutoRestart
+// ---------------------------------------------------------------------------
+
+func TestShouldAutoRestart_PolicyNo(t *testing.T) {
+	m := newTestManager([]config.Service{
+		{Name: "web", Cmd: "echo hi", Restart: "no"},
+	})
+	svc := m.Services[0]
+	svc.Status = StatusCrashed
+	if m.shouldAutoRestart(svc, true) {
+		t.Error("expected no auto-restart with policy 'no'")
+	}
+}
+
+func TestShouldAutoRestart_PolicyEmpty(t *testing.T) {
+	m := newTestManager([]config.Service{
+		{Name: "web", Cmd: "echo hi"},
+	})
+	svc := m.Services[0]
+	svc.Status = StatusCrashed
+	if m.shouldAutoRestart(svc, true) {
+		t.Error("expected no auto-restart with empty (default) policy")
+	}
+}
+
+func TestShouldAutoRestart_Always_OnFailure(t *testing.T) {
+	m := newTestManager([]config.Service{
+		{Name: "web", Cmd: "echo hi", Restart: "always"},
+	})
+	svc := m.Services[0]
+	svc.Status = StatusCrashed
+	if !m.shouldAutoRestart(svc, true) {
+		t.Error("expected auto-restart with policy 'always' on failure")
+	}
+}
+
+func TestShouldAutoRestart_Always_OnSuccess(t *testing.T) {
+	m := newTestManager([]config.Service{
+		{Name: "web", Cmd: "echo hi", Restart: "always"},
+	})
+	svc := m.Services[0]
+	svc.Status = StatusStopped
+	if !m.shouldAutoRestart(svc, false) {
+		t.Error("expected auto-restart with policy 'always' on success")
+	}
+}
+
+func TestShouldAutoRestart_OnFailure_Crash(t *testing.T) {
+	m := newTestManager([]config.Service{
+		{Name: "web", Cmd: "echo hi", Restart: "on-failure"},
+	})
+	svc := m.Services[0]
+	svc.Status = StatusCrashed
+	if !m.shouldAutoRestart(svc, true) {
+		t.Error("expected auto-restart with policy 'on-failure' on crash")
+	}
+}
+
+func TestShouldAutoRestart_OnFailure_NormalExit(t *testing.T) {
+	m := newTestManager([]config.Service{
+		{Name: "web", Cmd: "echo hi", Restart: "on-failure"},
+	})
+	svc := m.Services[0]
+	svc.Status = StatusStopped
+	if m.shouldAutoRestart(svc, false) {
+		t.Error("expected no auto-restart with policy 'on-failure' on normal exit")
+	}
+}
+
+func TestShouldAutoRestart_OnSuccess_NormalExit(t *testing.T) {
+	m := newTestManager([]config.Service{
+		{Name: "web", Cmd: "echo hi", Restart: "on-success"},
+	})
+	svc := m.Services[0]
+	svc.Status = StatusStopped
+	if !m.shouldAutoRestart(svc, false) {
+		t.Error("expected auto-restart with policy 'on-success' on normal exit")
+	}
+}
+
+func TestShouldAutoRestart_OnSuccess_Crash(t *testing.T) {
+	m := newTestManager([]config.Service{
+		{Name: "web", Cmd: "echo hi", Restart: "on-success"},
+	})
+	svc := m.Services[0]
+	svc.Status = StatusCrashed
+	if m.shouldAutoRestart(svc, true) {
+		t.Error("expected no auto-restart with policy 'on-success' on crash")
+	}
+}
+
+func TestShouldAutoRestart_MaxRestartsReached(t *testing.T) {
+	m := newTestManager([]config.Service{
+		{Name: "web", Cmd: "echo hi", Restart: "always", MaxRestarts: 3},
+	})
+	svc := m.Services[0]
+	svc.Status = StatusCrashed
+	svc.RestartCount = 3
+	if m.shouldAutoRestart(svc, true) {
+		t.Error("expected no auto-restart when max_restarts reached")
+	}
+}
+
+func TestShouldAutoRestart_MaxRestartsNotReached(t *testing.T) {
+	m := newTestManager([]config.Service{
+		{Name: "web", Cmd: "echo hi", Restart: "always", MaxRestarts: 3},
+	})
+	svc := m.Services[0]
+	svc.Status = StatusCrashed
+	svc.RestartCount = 2
+	if !m.shouldAutoRestart(svc, true) {
+		t.Error("expected auto-restart when under max_restarts")
+	}
+}
+
+func TestShouldAutoRestart_UnlimitedRestarts(t *testing.T) {
+	m := newTestManager([]config.Service{
+		{Name: "web", Cmd: "echo hi", Restart: "always", MaxRestarts: 0},
+	})
+	svc := m.Services[0]
+	svc.Status = StatusCrashed
+	svc.RestartCount = 100
+	if !m.shouldAutoRestart(svc, true) {
+		t.Error("expected auto-restart with unlimited restarts (max_restarts=0)")
+	}
+}
+
+func TestShouldAutoRestart_IntentionalStop(t *testing.T) {
+	m := newTestManager([]config.Service{
+		{Name: "web", Cmd: "echo hi", Restart: "always"},
+	})
+	svc := m.Services[0]
+	// StatusStarting simulates a state that's not crashed/stopped
+	svc.Status = StatusStarting
+	if m.shouldAutoRestart(svc, true) {
+		t.Error("expected no auto-restart when status is not crashed/stopped")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Auto-restart integration
+// ---------------------------------------------------------------------------
+
+func TestAutoRestart_OnFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	m := newTestManager([]config.Service{
+		{Name: "crasher", Dir: tmpDir, Cmd: "exit 1", Restart: "on-failure", RestartDelay: "500ms", MaxRestarts: 2},
+	})
+
+	cmd := m.StartAll()
+	cmd()
+
+	// Wait for it to crash and auto-restart a couple of times
+	deadline := time.After(10 * time.Second)
+	for {
+		svc := m.Services[0]
+		svc.mu.Lock()
+		count := svc.RestartCount
+		svc.mu.Unlock()
+
+		if count >= 2 {
+			break
+		}
+
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for auto-restarts, count=%d", count)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+
+	// After hitting max_restarts, should stay crashed
+	time.Sleep(1 * time.Second)
+	svc := m.Services[0]
+	svc.mu.Lock()
+	count := svc.RestartCount
+	status := svc.Status
+	svc.mu.Unlock()
+
+	if count != 2 {
+		t.Errorf("expected restart count of 2, got %d", count)
+	}
+	if status != StatusCrashed {
+		t.Errorf("expected crashed status after max_restarts, got %v", status)
+	}
+
+	m.StopAll()
+}
+
+func TestManualRestart_ResetsRestartCount(t *testing.T) {
+	m := newTestManager([]config.Service{
+		{Name: "web", Cmd: "echo hi", Restart: "always", MaxRestarts: 5},
+	})
+	svc := m.Services[0]
+	svc.RestartCount = 4
+
+	// Simulate manual restart resetting the counter
+	svc.mu.Lock()
+	svc.RestartCount = 0
+	svc.mu.Unlock()
+
+	if svc.RestartCount != 0 {
+		t.Errorf("expected restart count to be reset to 0, got %d", svc.RestartCount)
 	}
 }

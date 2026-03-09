@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidate_NoDependencies(t *testing.T) {
@@ -146,5 +147,105 @@ func TestValidate_DiamondDependency(t *testing.T) {
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("expected no error for diamond dependency, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Restart policy validation
+// ---------------------------------------------------------------------------
+
+func TestValidate_ValidRestartPolicies(t *testing.T) {
+	for _, policy := range []string{"", "no", "always", "on-failure", "on-success"} {
+		cfg := &Config{
+			Services: []Service{
+				{Name: "web", Cmd: "echo hi", Restart: policy},
+			},
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("expected no error for restart=%q, got: %v", policy, err)
+		}
+	}
+}
+
+func TestValidate_InvalidRestartPolicy(t *testing.T) {
+	cfg := &Config{
+		Services: []Service{
+			{Name: "web", Cmd: "echo hi", Restart: "bogus"},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for invalid restart policy")
+	}
+	if !strings.Contains(err.Error(), "invalid restart policy") {
+		t.Fatalf("expected 'invalid restart policy' error, got: %v", err)
+	}
+}
+
+func TestValidate_InvalidRestartDelay(t *testing.T) {
+	cfg := &Config{
+		Services: []Service{
+			{Name: "web", Cmd: "echo hi", RestartDelay: "notaduration"},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for invalid restart_delay")
+	}
+	if !strings.Contains(err.Error(), "invalid restart_delay") {
+		t.Fatalf("expected 'invalid restart_delay' error, got: %v", err)
+	}
+}
+
+func TestValidate_ValidRestartDelay(t *testing.T) {
+	cfg := &Config{
+		Services: []Service{
+			{Name: "web", Cmd: "echo hi", RestartDelay: "5s"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ParsedRestartDelay / RestartPolicy helpers
+// ---------------------------------------------------------------------------
+
+func TestParsedRestartDelay_Default(t *testing.T) {
+	svc := Service{Name: "web"}
+	d := svc.ParsedRestartDelay()
+	if d != 3*time.Second {
+		t.Errorf("expected 3s default, got %v", d)
+	}
+}
+
+func TestParsedRestartDelay_Custom(t *testing.T) {
+	svc := Service{Name: "web", RestartDelay: "10s"}
+	d := svc.ParsedRestartDelay()
+	if d != 10*time.Second {
+		t.Errorf("expected 10s, got %v", d)
+	}
+}
+
+func TestParsedRestartDelay_Invalid(t *testing.T) {
+	svc := Service{Name: "web", RestartDelay: "bad"}
+	d := svc.ParsedRestartDelay()
+	if d != 3*time.Second {
+		t.Errorf("expected 3s fallback for invalid delay, got %v", d)
+	}
+}
+
+func TestRestartPolicy_Default(t *testing.T) {
+	svc := Service{Name: "web"}
+	if p := svc.RestartPolicy(); p != "no" {
+		t.Errorf("expected 'no' default, got %q", p)
+	}
+}
+
+func TestRestartPolicy_Set(t *testing.T) {
+	svc := Service{Name: "web", Restart: "on-failure"}
+	if p := svc.RestartPolicy(); p != "on-failure" {
+		t.Errorf("expected 'on-failure', got %q", p)
 	}
 }
