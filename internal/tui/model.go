@@ -92,8 +92,10 @@ func (m DashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch key {
 	case "q", "ctrl+c":
-		m.mgr.StopAll()
-		return m, tea.Quit
+		return m, func() tea.Msg {
+			m.mgr.StopAll()
+			return tea.QuitMsg{}
+		}
 
 	case "tab":
 		if m.view == viewSplit {

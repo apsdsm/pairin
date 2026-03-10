@@ -368,7 +368,6 @@ func (m *Manager) RestartService(idx int) tea.Cmd {
 func (m *Manager) stopService(idx int) {
 	svc := m.Services[idx]
 	svc.mu.Lock()
-	defer svc.mu.Unlock()
 
 	// Cancel healthcheck poller
 	if svc.healthCancel != nil {
@@ -378,14 +377,17 @@ func (m *Manager) stopService(idx int) {
 	svc.Healthy = false
 
 	if svc.cmd == nil || svc.cmd.Process == nil {
+		svc.mu.Unlock()
 		return
 	}
 
 	svc.Status = StatusStopped
 	svc.Logs.Add("[pairin] stopping...")
+	cmd := svc.cmd
+	svc.mu.Unlock()
 
-	// Send SIGINT to process group
-	pgid, err := syscall.Getpgid(svc.cmd.Process.Pid)
+	// Send SIGINT to process group (mutex released so captureOutput can drain the pipe)
+	pgid, err := syscall.Getpgid(cmd.Process.Pid)
 	if err == nil {
 		syscall.Kill(-pgid, syscall.SIGINT)
 	}
@@ -393,9 +395,7 @@ func (m *Manager) stopService(idx int) {
 	// Wait up to 5 seconds for graceful shutdown
 	done := make(chan struct{})
 	go func() {
-		if svc.cmd.Process != nil {
-			svc.cmd.Process.Wait()
-		}
+		cmd.Process.Wait()
 		close(done)
 	}()
 
@@ -409,15 +409,23 @@ func (m *Manager) stopService(idx int) {
 		<-done
 	}
 
+	svc.mu.Lock()
 	svc.PID = 0
 	svc.cmd = nil
+	svc.mu.Unlock()
 }
 
-// StopAll stops all services. Called on quit.
+// StopAll stops all services in parallel. Called on quit.
 func (m *Manager) StopAll() {
+	var wg sync.WaitGroup
 	for i := range m.Services {
-		m.stopService(i)
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			m.stopService(idx)
+		}(i)
 	}
+	wg.Wait()
 }
 
 func detectBranch(dir string) string {
