@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -112,6 +113,7 @@ type Manager struct {
 	program   *tea.Program
 	mu        sync.Mutex
 	err       error
+	quitting  atomic.Bool
 }
 
 func NewManager(cfg *config.Config) *Manager {
@@ -271,7 +273,7 @@ func (m *Manager) waitForExit(idx int, cmd *exec.Cmd, gen int) {
 	svc.cmd = nil
 	svc.mu.Unlock()
 
-	if shouldRestart {
+	if shouldRestart && !m.quitting.Load() {
 		m.autoRestartService(idx, gen)
 	}
 }
@@ -310,6 +312,10 @@ func (m *Manager) shouldAutoRestart(svc *Service, exitedWithFailure bool) bool {
 // autoRestartService handles the auto-restart flow: sets status to restarting,
 // waits for the cooldown delay, then restarts the service.
 func (m *Manager) autoRestartService(idx int, originalGen int) {
+	if m.quitting.Load() {
+		return
+	}
+
 	svc := m.Services[idx]
 	delay := svc.Config.ParsedRestartDelay()
 
@@ -334,6 +340,10 @@ func (m *Manager) autoRestartService(idx int, originalGen int) {
 	m.send(StatusMsg{Index: idx, Status: StatusRestarting})
 
 	time.Sleep(delay)
+
+	if m.quitting.Load() {
+		return
+	}
 
 	// Check generation again after sleep
 	svc.mu.Lock()
@@ -402,11 +412,16 @@ func (m *Manager) stopService(idx int) {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		// Force kill
 		if pgid != 0 {
 			syscall.Kill(-pgid, syscall.SIGKILL)
 		}
-		<-done
+		cmd.Process.Kill() // fallback: always try direct kill
+
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			// Abandon wait — process is truly stuck
+		}
 	}
 
 	svc.mu.Lock()
@@ -417,15 +432,31 @@ func (m *Manager) stopService(idx int) {
 
 // StopAll stops all services in parallel. Called on quit.
 func (m *Manager) StopAll() {
-	var wg sync.WaitGroup
-	for i := range m.Services {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			m.stopService(idx)
-		}(i)
+	m.quitting.Store(true)
+
+	done := make(chan struct{})
+	go func() {
+		var wg sync.WaitGroup
+		for i := range m.Services {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				m.stopService(idx)
+			}(i)
+		}
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		// Hard timeout: must exit regardless
 	}
-	wg.Wait()
+
+	m.mu.Lock()
+	m.program = nil
+	m.mu.Unlock()
 }
 
 func detectBranch(dir string) string {

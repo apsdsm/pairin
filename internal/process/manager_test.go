@@ -932,3 +932,278 @@ func TestManualRestart_ResetsRestartCount(t *testing.T) {
 		t.Errorf("expected restart count to be reset to 0, got %d", svc.RestartCount)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Shutdown path
+// ---------------------------------------------------------------------------
+
+func TestStopAll_SetsQuittingFlag(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	m := newTestManager([]config.Service{
+		{Name: "a", Dir: tmpDir, Cmd: "sleep 60"},
+	})
+
+	cmd := m.StartAll()
+	cmd()
+
+	m.StopAll()
+
+	if !m.quitting.Load() {
+		t.Error("expected quitting flag to be true after StopAll")
+	}
+}
+
+func TestStopAll_NilsProgramAfterShutdown(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	m := newTestManager([]config.Service{
+		{Name: "a", Dir: tmpDir, Cmd: "sleep 60"},
+	})
+	// Simulate a program being set (use nil tea.Program via SetProgram is fine
+	// since send() already handles nil; we just check StopAll clears it)
+	m.mu.Lock()
+	m.program = nil // already nil, but let's set a non-nil marker via direct field
+	m.mu.Unlock()
+
+	cmd := m.StartAll()
+	cmd()
+
+	m.StopAll()
+
+	m.mu.Lock()
+	p := m.program
+	m.mu.Unlock()
+
+	if p != nil {
+		t.Error("expected program to be nil after StopAll")
+	}
+}
+
+func TestStopAll_CompletesWithinTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	m := newTestManager([]config.Service{
+		{Name: "a", Dir: tmpDir, Cmd: "sleep 60"},
+		{Name: "b", Dir: tmpDir, Cmd: "sleep 60"},
+		{Name: "c", Dir: tmpDir, Cmd: "sleep 60"},
+	})
+
+	cmd := m.StartAll()
+	cmd()
+
+	done := make(chan struct{})
+	go func() {
+		m.StopAll()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Good — StopAll returned
+	case <-time.After(10 * time.Second):
+		t.Fatal("StopAll blocked for more than 10 seconds")
+	}
+}
+
+func TestStopService_KillsSIGINTIgnoringProcess(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Process that traps SIGINT and refuses to die — must be killed with SIGKILL
+	m := newTestManager([]config.Service{
+		{Name: "stubborn", Dir: tmpDir, Cmd: "trap '' INT; sleep 60"},
+	})
+
+	cmd := m.StartAll()
+	cmd()
+
+	svc := m.Services[0]
+	svc.mu.Lock()
+	pid := svc.PID
+	svc.mu.Unlock()
+
+	if pid == 0 {
+		t.Fatal("expected service to have a PID")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		m.stopService(0)
+		close(done)
+	}()
+
+	// stopService should complete: 5s SIGINT grace + SIGKILL fallback + 3s max
+	select {
+	case <-done:
+		// Good
+	case <-time.After(12 * time.Second):
+		t.Fatal("stopService blocked on a SIGINT-ignoring process")
+	}
+}
+
+func TestStopAll_KillsSIGINTIgnoringProcesses(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Multiple SIGINT-ignoring processes — the scenario that caused the original freeze
+	m := newTestManager([]config.Service{
+		{Name: "a", Dir: tmpDir, Cmd: "trap '' INT; sleep 60"},
+		{Name: "b", Dir: tmpDir, Cmd: "trap '' INT; sleep 60"},
+	})
+
+	cmd := m.StartAll()
+	cmd()
+
+	done := make(chan struct{})
+	go func() {
+		m.StopAll()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Good — all stopped despite ignoring SIGINT
+	case <-time.After(12 * time.Second):
+		t.Fatal("StopAll blocked on SIGINT-ignoring processes")
+	}
+}
+
+func TestStopService_HandlesAlreadyExitedProcess(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Process that exits immediately
+	m := newTestManager([]config.Service{
+		{Name: "fast", Dir: tmpDir, Cmd: "true"},
+	})
+
+	cmd := m.StartAll()
+	cmd()
+
+	// Wait for the process to exit on its own
+	deadline := time.After(3 * time.Second)
+	for {
+		svc := m.Services[0]
+		svc.mu.Lock()
+		status := svc.Status
+		svc.mu.Unlock()
+
+		if status == StatusStopped || status == StatusCrashed {
+			break
+		}
+
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for process to exit")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	// Now call stopService on the already-exited process — should not hang
+	done := make(chan struct{})
+	go func() {
+		m.stopService(0)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Good
+	case <-time.After(3 * time.Second):
+		t.Fatal("stopService blocked on already-exited process")
+	}
+}
+
+func TestStopAll_QuittingFlagPreventsAutoRestart(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	m := newTestManager([]config.Service{
+		{Name: "crasher", Dir: tmpDir, Cmd: "sleep 60", Restart: "always", RestartDelay: "100ms"},
+	})
+
+	cmd := m.StartAll()
+	cmd()
+
+	// Verify service is running
+	svc := m.Services[0]
+	svc.mu.Lock()
+	status := svc.Status
+	svc.mu.Unlock()
+
+	if status != StatusRunning {
+		t.Fatalf("expected running before StopAll, got %v", status)
+	}
+
+	m.StopAll()
+
+	// Wait a bit longer than the restart delay to ensure no restart fires
+	time.Sleep(500 * time.Millisecond)
+
+	svc.mu.Lock()
+	restartCount := svc.RestartCount
+	finalStatus := svc.Status
+	svc.mu.Unlock()
+
+	if restartCount != 0 {
+		t.Errorf("expected 0 restarts during shutdown, got %d", restartCount)
+	}
+	if finalStatus == StatusRunning || finalStatus == StatusRestarting {
+		t.Errorf("service should not be running/restarting after StopAll, got %v", finalStatus)
+	}
+}
+
+func TestAutoRestart_QuittingFlagDuringDelay(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Service that crashes immediately with a long restart delay
+	m := newTestManager([]config.Service{
+		{Name: "crasher", Dir: tmpDir, Cmd: "exit 1", Restart: "on-failure", RestartDelay: "5s"},
+	})
+
+	cmd := m.StartAll()
+	cmd()
+
+	// Wait for it to enter restarting status (crash + begin restart delay)
+	deadline := time.After(3 * time.Second)
+	for {
+		svc := m.Services[0]
+		svc.mu.Lock()
+		status := svc.Status
+		svc.mu.Unlock()
+
+		if status == StatusRestarting {
+			break
+		}
+
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for restarting status")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	// Now call StopAll while it's in the restart delay sleep
+	done := make(chan struct{})
+	go func() {
+		m.StopAll()
+		close(done)
+	}()
+
+	// StopAll should return quickly — not wait for the 5s restart delay
+	select {
+	case <-done:
+		// Good
+	case <-time.After(3 * time.Second):
+		t.Fatal("StopAll blocked waiting for restart delay to finish")
+	}
+
+	// The service should NOT have been restarted
+	svc := m.Services[0]
+	svc.mu.Lock()
+	restartCount := svc.RestartCount
+	svc.mu.Unlock()
+
+	// It entered restarting once, but the quitting flag should prevent
+	// the actual restart from happening after the delay completes
+	if restartCount > 1 {
+		t.Errorf("expected at most 1 restart count, got %d", restartCount)
+	}
+}

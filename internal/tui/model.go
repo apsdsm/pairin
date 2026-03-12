@@ -18,14 +18,15 @@ const (
 )
 
 type DashboardModel struct {
-	cfg     *config.Config
-	mgr     *process.Manager
-	panes   []Pane
-	width   int
-	height  int
-	view    viewState
-	active  int // active pane index in split view
-	focused int // focused pane index in focus view
+	cfg      *config.Config
+	mgr      *process.Manager
+	panes    []Pane
+	width    int
+	height   int
+	view     viewState
+	active   int // active pane index in split view
+	focused  int // focused pane index in focus view
+	quitting bool
 }
 
 func NewDashboardModel(cfg *config.Config, mgr *process.Manager) DashboardModel {
@@ -92,6 +93,10 @@ func (m DashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch key {
 	case "q", "ctrl+c":
+		if m.quitting {
+			return m, nil
+		}
+		m.quitting = true
 		return m, func() tea.Msg {
 			m.mgr.StopAll()
 			return tea.QuitMsg{}
@@ -261,6 +266,10 @@ func (m DashboardModel) renderHeader() string {
 }
 
 func (m DashboardModel) renderFooter() string {
+	if m.quitting {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true).Render("Shutting down...")
+	}
+
 	var parts []string
 	for i, svc := range m.mgr.Services {
 		parts = append(parts, fmt.Sprintf("%d %s", i+1, svc.Config.Short))
