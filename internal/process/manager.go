@@ -204,6 +204,13 @@ func (m *Manager) StopService(idx int) {
 	m.stopService(idx)
 }
 
+// Shutdown is an alias for StopAll so Manager satisfies the TUI backend
+// interface alongside control.Client. Always returns nil.
+func (m *Manager) Shutdown() error {
+	m.StopAll()
+	return nil
+}
+
 // SetSink installs the event sink (tea.Program or socket broadcaster).
 func (m *Manager) SetSink(s Sink) {
 	m.mu.Lock()

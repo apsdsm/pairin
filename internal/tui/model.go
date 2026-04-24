@@ -25,19 +25,21 @@ type Backend interface {
 	StartAll() tea.Cmd
 	RestartService(idx int) tea.Cmd
 	StopAll()
+	Shutdown() error
 	SetProgram(p *tea.Program)
 }
 
 type DashboardModel struct {
-	cfg      *config.Config
-	mgr      Backend
-	panes    []Pane
-	width    int
-	height   int
-	view     viewState
-	active   int // active pane index in split view
-	focused  int // focused pane index in focus view
-	quitting bool
+	cfg       *config.Config
+	mgr       Backend
+	panes     []Pane
+	width     int
+	height    int
+	view      viewState
+	active    int // active pane index in split view
+	focused   int // focused pane index in focus view
+	quitting  bool
+	shuttingDown bool // true when quitting via 'D' rather than 'q'
 }
 
 func NewDashboardModel(cfg *config.Config, mgr Backend) DashboardModel {
@@ -106,13 +108,25 @@ func (m DashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key {
 	case "q", "ctrl+c":
 		// Detach: tear down the TUI, leave the supervisor (and services)
-		// running. Use `pairin down` to stop everything for real.
+		// running. Use 'D' or `pairin down` to stop everything for real.
 		if m.quitting {
 			return m, nil
 		}
 		m.quitting = true
 		return m, func() tea.Msg {
 			m.mgr.StopAll()
+			return tea.QuitMsg{}
+		}
+
+	case "D":
+		// Shutdown: stop every service and exit the supervisor.
+		if m.quitting {
+			return m, nil
+		}
+		m.quitting = true
+		m.shuttingDown = true
+		return m, func() tea.Msg {
+			_ = m.mgr.Shutdown()
 			return tea.QuitMsg{}
 		}
 
@@ -281,7 +295,11 @@ func (m DashboardModel) renderHeader() string {
 
 func (m DashboardModel) renderFooter() string {
 	if m.quitting {
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true).Render("Detaching...")
+		msg := "Detaching..."
+		if m.shuttingDown {
+			msg = "Shutting down..."
+		}
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true).Render(msg)
 	}
 
 	var parts []string
@@ -290,7 +308,7 @@ func (m DashboardModel) renderFooter() string {
 	}
 
 	hints := strings.Join(parts, "  ")
-	extra := "  tab cycle  r restart  a split  q detach"
+	extra := "  tab cycle  r restart  a split  q detach  D down"
 
 	return FooterStyle.Render(hints + extra)
 }
