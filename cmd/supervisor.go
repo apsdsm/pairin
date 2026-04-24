@@ -57,6 +57,20 @@ func runSupervisor(cmd *cobra.Command, args []string) error {
 	}
 	defer os.Remove(supervisorPidPath(cfg.Path))
 
+	// Announce ourselves to the global registry so `pairin ls` can find us.
+	// Best-effort: a failed registration shouldn't block service startup.
+	inst := state.Instance{
+		SupervisorPID: os.Getpid(),
+		ConfigPath:    cfg.Path,
+		ProjectName:   cfg.Project.Name,
+		SocketPath:    state.SocketPath(cfg.Path),
+		StartedAt:     time.Now(),
+	}
+	if err := state.Register(inst); err != nil {
+		fmt.Fprintf(os.Stderr, "pairin: registry registration failed: %v\n", err)
+	}
+	defer state.Unregister(cfg.Path)
+
 	mgr := process.NewManager(cfg)
 
 	// If we were asked to adopt, pull the survivors out of state.json before
