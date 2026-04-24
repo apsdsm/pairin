@@ -336,6 +336,11 @@ func (m *Manager) persistState() {
 	if m.configPath == "" {
 		return
 	}
+	// During shutdown, StopAll clears state.json as its last act. A late
+	// persistState goroutine firing after that would re-create a stale file.
+	if m.quitting.Load() {
+		return
+	}
 	snap := &state.State{ConfigPath: m.configPath}
 	for _, svc := range m.Services {
 		svc.mu.Lock()

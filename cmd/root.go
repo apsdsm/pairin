@@ -19,9 +19,11 @@ import (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "pairin",
-	Short: "Local development process manager",
-	RunE:  runUp,
+	Use:           "pairin",
+	Short:         "Local development process manager",
+	RunE:          runUp,
+	SilenceUsage:  true,
+	SilenceErrors: false,
 }
 
 func Execute() error {

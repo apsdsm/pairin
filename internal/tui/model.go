@@ -105,6 +105,8 @@ func (m DashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch key {
 	case "q", "ctrl+c":
+		// Detach: tear down the TUI, leave the supervisor (and services)
+		// running. Use `pairin down` to stop everything for real.
 		if m.quitting {
 			return m, nil
 		}
@@ -279,7 +281,7 @@ func (m DashboardModel) renderHeader() string {
 
 func (m DashboardModel) renderFooter() string {
 	if m.quitting {
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true).Render("Shutting down...")
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true).Render("Detaching...")
 	}
 
 	var parts []string
@@ -288,7 +290,7 @@ func (m DashboardModel) renderFooter() string {
 	}
 
 	hints := strings.Join(parts, "  ")
-	extra := "  tab cycle  r restart  a split  q quit"
+	extra := "  tab cycle  r restart  a split  q detach"
 
 	return FooterStyle.Render(hints + extra)
 }
