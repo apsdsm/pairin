@@ -42,11 +42,17 @@ type DashboardModel struct {
 	shuttingDown bool // true when quitting via 'D' rather than 'q'
 }
 
+// preloadHistoryLines is how many trailing log lines we pull from disk on
+// attach so that reattaching to an already-running supervisor doesn't look
+// like a blank screen.
+const preloadHistoryLines = 500
+
 func NewDashboardModel(cfg *config.Config, mgr Backend) DashboardModel {
 	svcs := mgr.ServiceList()
 	panes := make([]Pane, len(svcs))
 	for i, svc := range svcs {
-		panes[i] = NewPane(svc)
+		panes[i] = NewPane(svc, i)
+		panes[i].PreloadHistory(preloadHistoryLines)
 	}
 
 	return DashboardModel{
@@ -118,7 +124,7 @@ func (m DashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return tea.QuitMsg{}
 		}
 
-	case "D":
+	case "d":
 		// Shutdown: stop every service and exit the supervisor.
 		if m.quitting {
 			return m, nil
@@ -142,15 +148,21 @@ func (m DashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "a":
-		m.view = viewSplit
+	case "z":
+		// Zoom toggle: split <-> focus on the active pane.
+		if m.view == viewFocus {
+			m.view = viewSplit
+		} else {
+			m.view = viewFocus
+			m.focused = m.active
+		}
 		m.recalcPaneSizes()
 		return m, nil
 
 	case "r":
 		idx := m.activeIndex()
 		// Clear pane lines for the restarting service
-		m.panes[idx] = NewPane(m.mgr.ServiceList()[idx])
+		m.panes[idx] = NewPane(m.mgr.ServiceList()[idx], idx)
 		m.recalcPaneSizes()
 		return m, m.mgr.RestartService(idx)
 
@@ -257,40 +269,9 @@ func (m DashboardModel) View() string {
 }
 
 func (m DashboardModel) renderHeader() string {
-	title := HeaderStyle.Render(m.cfg.Project.Name)
-
-	var indicators []string
-	for _, svc := range m.mgr.ServiceList() {
-		color := ServiceColor(svc.Config.Color)
-		var dot string
-		switch svc.Status {
-		case process.StatusRunning:
-			if svc.Config.Healthcheck != "" && !svc.Healthy {
-				dot = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("◐")
-			} else {
-				dot = lipgloss.NewStyle().Foreground(color).Render("●")
-			}
-		case process.StatusCrashed:
-			dot = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render("●")
-		case process.StatusStarting:
-			dot = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("○")
-		case process.StatusRestarting:
-			dot = lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Render("◐")
-		case process.StatusWaiting:
-			dot = lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Render("○")
-		default:
-			dot = lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("○")
-		}
-		indicators = append(indicators, dot+" "+DimStyle.Render(svc.Config.Short))
-	}
-
-	right := strings.Join(indicators, "  ")
-	gap := m.width - lipgloss.Width(title) - lipgloss.Width(right)
-	if gap < 1 {
-		gap = 1
-	}
-
-	return title + strings.Repeat(" ", gap) + right
+	// Each pane's title bar carries its own status/name/health/PID, so the
+	// header just shows the project name.
+	return HeaderStyle.Render(m.cfg.Project.Name)
 }
 
 func (m DashboardModel) renderFooter() string {
@@ -301,14 +282,5 @@ func (m DashboardModel) renderFooter() string {
 		}
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true).Render(msg)
 	}
-
-	var parts []string
-	for i, svc := range m.mgr.ServiceList() {
-		parts = append(parts, fmt.Sprintf("%d %s", i+1, svc.Config.Short))
-	}
-
-	hints := strings.Join(parts, "  ")
-	extra := "  tab cycle  r restart  a split  q detach  D down"
-
-	return FooterStyle.Render(hints + extra)
+	return FooterStyle.Render("tab cycle  r restart  z zoom  q detach  d down")
 }

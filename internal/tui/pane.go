@@ -23,15 +23,34 @@ type Pane struct {
 	lines    []string
 	width    int
 	height   int
+	index    int // 0-based position in the pane list; shortcut key is index+1
 }
 
-func NewPane(svc *process.Service) Pane {
+func NewPane(svc *process.Service, index int) Pane {
 	vp := viewport.New(80, 10)
 	vp.MouseWheelEnabled = true
 	return Pane{
 		service:  svc,
 		viewport: vp,
+		index:    index,
 	}
+}
+
+// PreloadHistory seeds the pane with the tail of the service's log file so
+// that reattach to a long-running supervisor still shows context rather than
+// an empty screen. Bounded: reads at most the last 1 MB and keeps at most
+// maxLines lines.
+func (p *Pane) PreloadHistory(maxLines int) {
+	path := p.service.LogFile
+	if path == "" {
+		return
+	}
+	lines, err := tailLines(path, int64(maxLines), 1*1024*1024)
+	if err != nil || len(lines) == 0 {
+		return
+	}
+	p.lines = append(p.lines, lines...)
+	p.updateContent()
 }
 
 func (p *Pane) SetSize(width, height int) {
@@ -102,6 +121,7 @@ func (p *Pane) titleLine(active bool) string {
 	}
 
 	parts := []string{
+		DimStyle.Render(fmt.Sprintf("[%d]", p.index+1)),
 		nameStyle.Render(svc.Config.Name),
 		DimStyle.Render(svc.Branch),
 		statusStyle.Render(statusText),
