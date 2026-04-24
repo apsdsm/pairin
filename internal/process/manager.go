@@ -1,12 +1,13 @@
 package process
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/apsdsm/pairin/internal/config"
+	"github.com/apsdsm/pairin/internal/state"
 )
 
 type Status int
@@ -88,14 +90,25 @@ type Service struct {
 	Config  config.Service
 	Status  Status
 	PID     int
+	PGID    int
 	Branch  string
 	Logs    *RingBuffer
 	Healthy bool
 	RestartCount int // number of auto-restarts since last manual start/restart
 
+	// LogFile is the absolute path of the service's stdout/stderr log.
+	LogFile string
+
+	// Adopted is true when this Service was attached to a pre-existing
+	// orphaned process (e.g. after a pairin crash). Adopted services do not
+	// have an *exec.Cmd we can Wait on; liveness is polled instead and they
+	// cannot be restarted in phase 1.
+	Adopted bool
+
 	cmd          *exec.Cmd
 	generation   int
 	healthCancel context.CancelFunc
+	tailCancel   context.CancelFunc
 	mu           sync.Mutex
 }
 
@@ -108,12 +121,13 @@ func (s *Service) GetLines() []string {
 
 // Manager orchestrates all services.
 type Manager struct {
-	Services  []*Service
-	nameToIdx map[string]int
-	program   *tea.Program
-	mu        sync.Mutex
-	err       error
-	quitting  atomic.Bool
+	Services   []*Service
+	configPath string
+	nameToIdx  map[string]int
+	program    *tea.Program
+	mu         sync.Mutex
+	err        error
+	quitting   atomic.Bool
 }
 
 func NewManager(cfg *config.Config) *Manager {
@@ -121,14 +135,22 @@ func NewManager(cfg *config.Config) *Manager {
 	nameToIdx := make(map[string]int, len(cfg.Services))
 	for i, sc := range cfg.Services {
 		services[i] = &Service{
-			Config: sc,
-			Status: StatusStopped,
-			Logs:   NewRingBuffer(ringBufferSize),
+			Config:  sc,
+			Status:  StatusStopped,
+			Logs:    NewRingBuffer(ringBufferSize),
+			LogFile: state.LogFilePath(cfg.Path, sc.Name),
 		}
 		nameToIdx[sc.Name] = i
 	}
-	return &Manager{Services: services, nameToIdx: nameToIdx}
+	return &Manager{
+		Services:   services,
+		configPath: cfg.Path,
+		nameToIdx:  nameToIdx,
+	}
 }
+
+// ConfigPath returns the path to the .pairinrc.toml the manager was built from.
+func (m *Manager) ConfigPath() string { return m.configPath }
 
 func (m *Manager) SetProgram(p *tea.Program) {
 	m.mu.Lock()
@@ -153,9 +175,18 @@ func (m *Manager) send(msg tea.Msg) {
 
 // StartAll launches all services. Services with unmet dependencies enter
 // StatusWaiting and are started automatically once their deps become healthy.
+// Already-adopted services are left running; they just get a status broadcast
+// so the TUI renders them.
 func (m *Manager) StartAll() tea.Cmd {
 	return func() tea.Msg {
 		for i, svc := range m.Services {
+			svc.mu.Lock()
+			adopted := svc.Adopted
+			svc.mu.Unlock()
+			if adopted {
+				m.send(StatusMsg{Index: i, Status: StatusRunning, PID: svc.PID})
+				continue
+			}
 			if len(svc.Config.DependsOn) == 0 || m.allDepsHealthy(i) {
 				m.startService(i)
 			} else {
@@ -171,12 +202,110 @@ func (m *Manager) StartAll() tea.Cmd {
 	}
 }
 
+// AdoptService registers an orphaned process (from a previous pairin) as a
+// live service. No exec.Cmd is created; liveness is polled, stop works via
+// PGID signal, restart is not supported in phase 1.
+func (m *Manager) AdoptService(idx int, pid, pgid int, logFile string) {
+	svc := m.Services[idx]
+	svc.mu.Lock()
+	svc.generation++
+	svc.Adopted = true
+	svc.PID = pid
+	svc.PGID = pgid
+	if logFile != "" {
+		svc.LogFile = logFile
+	}
+	svc.Branch = detectBranch(svc.Config.Dir)
+	svc.Status = StatusRunning
+	svc.Logs.Add(fmt.Sprintf("[pairin] adopted existing process PID %d (from previous session)", pid))
+
+	m.startTailer(idx)
+	if svc.Config.Healthcheck != "" {
+		m.startHealthcheckPoller(idx)
+	}
+	gen := svc.generation
+	svc.mu.Unlock()
+
+	m.send(StatusMsg{Index: idx, Status: StatusRunning, PID: pid})
+
+	go m.watchAdopted(idx, pid, gen)
+	go m.persistState()
+}
+
+// watchAdopted polls an adopted process's liveness. When it disappears, the
+// service is marked Stopped (we can't know the exit code from outside).
+func (m *Manager) watchAdopted(idx, pid, gen int) {
+	svc := m.Services[idx]
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		if m.quitting.Load() {
+			return
+		}
+		svc.mu.Lock()
+		if svc.generation != gen {
+			svc.mu.Unlock()
+			return
+		}
+		svc.mu.Unlock()
+
+		if !state.IsProcessAlive(pid) {
+			svc.mu.Lock()
+			if svc.generation != gen {
+				svc.mu.Unlock()
+				return
+			}
+			svc.Status = StatusStopped
+			svc.Logs.Add("[pairin] adopted process exited")
+			svc.PID = 0
+			svc.PGID = 0
+			svc.Adopted = false
+			if svc.tailCancel != nil {
+				svc.tailCancel()
+				svc.tailCancel = nil
+			}
+			svc.mu.Unlock()
+			m.send(StatusMsg{Index: idx, Status: StatusStopped})
+			go m.persistState()
+			return
+		}
+	}
+}
+
+// persistState writes the current running-services snapshot to state.json.
+// Safe to call from any goroutine; serialized by its own write mutex.
+func (m *Manager) persistState() {
+	if m.configPath == "" {
+		return
+	}
+	snap := &state.State{ConfigPath: m.configPath}
+	for _, svc := range m.Services {
+		svc.mu.Lock()
+		if svc.PID > 0 && (svc.Status == StatusRunning || svc.Status == StatusStarting) {
+			snap.Services = append(snap.Services, state.ServiceState{
+				Name:      svc.Config.Name,
+				PID:       svc.PID,
+				PGID:      svc.PGID,
+				LogFile:   svc.LogFile,
+				Cmd:       svc.Config.Cmd,
+				Dir:       svc.Config.Dir,
+				StartedAt: time.Now(),
+			})
+		}
+		svc.mu.Unlock()
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_ = state.Save(m.configPath, snap)
+}
+
 func (m *Manager) startService(idx int) {
 	svc := m.Services[idx]
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
 
 	svc.generation++
+	svc.Adopted = false
 
 	// Detect git branch
 	svc.Branch = detectBranch(svc.Config.Dir)
@@ -184,34 +313,63 @@ func (m *Manager) startService(idx int) {
 	svc.Status = StatusStarting
 	m.send(StatusMsg{Index: idx, Status: StatusStarting})
 
-	cmd := exec.Command("sh", "-c", svc.Config.Cmd)
-	cmd.Dir = svc.Config.Dir
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Rotate the log file if it's grown past the threshold since last session.
+	// Rotation at-start only: the child owns the fd, so mid-session rotation
+	// would silently lose writes to the renamed file.
+	if err := state.RotateIfLarge(svc.LogFile); err != nil {
+		svc.Logs.Add(fmt.Sprintf("[pairin] log rotation failed: %v", err))
+	}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
+	if err := os.MkdirAll(state.LogsDir(m.configPath), 0o755); err != nil {
 		svc.Status = StatusCrashed
-		svc.Logs.Add(fmt.Sprintf("[pairin] failed to create stdout pipe: %v", err))
+		svc.Logs.Add(fmt.Sprintf("[pairin] failed to create logs dir: %v", err))
 		m.send(StatusMsg{Index: idx, Status: StatusCrashed})
 		return
 	}
 
-	cmd.Stderr = cmd.Stdout // merge stderr into stdout
+	// Open the log file for the child to write to. O_APPEND is belt-and-suspenders:
+	// the child has its own fd with its own append flag already, but this keeps
+	// behavior consistent if we ever write to it from pairin too.
+	logF, err := os.OpenFile(svc.LogFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	if err != nil {
+		svc.Status = StatusCrashed
+		svc.Logs.Add(fmt.Sprintf("[pairin] failed to open log file: %v", err))
+		m.send(StatusMsg{Index: idx, Status: StatusCrashed})
+		return
+	}
+
+	// Session marker so adopted/tailed logs are readable across pairin restarts.
+	fmt.Fprintf(logF, "\n--- pairin session started %s ---\n", time.Now().Format(time.RFC3339))
+
+	cmd := exec.Command("sh", "-c", svc.Config.Cmd)
+	cmd.Dir = svc.Config.Dir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stdout = logF
+	cmd.Stderr = logF
 
 	if err := cmd.Start(); err != nil {
+		logF.Close()
 		svc.Status = StatusCrashed
 		svc.Logs.Add(fmt.Sprintf("[pairin] failed to start: %v", err))
 		m.send(StatusMsg{Index: idx, Status: StatusCrashed})
 		return
 	}
 
+	// Child has its own dup of the fd; pairin's copy is no longer needed.
+	logF.Close()
+
 	svc.cmd = cmd
 	svc.PID = cmd.Process.Pid
+	if pgid, perr := syscall.Getpgid(svc.PID); perr == nil {
+		svc.PGID = pgid
+	} else {
+		svc.PGID = svc.PID
+	}
 	svc.Status = StatusRunning
 	m.send(StatusMsg{Index: idx, Status: StatusRunning, PID: svc.PID})
 
-	// Read output in background
-	go m.captureOutput(idx, stdout)
+	// Tail the log file in background to feed the TUI.
+	m.startTailer(idx)
 
 	// Wait for process to exit in background
 	gen := svc.generation
@@ -221,19 +379,140 @@ func (m *Manager) startService(idx int) {
 	if svc.Config.Healthcheck != "" {
 		m.startHealthcheckPoller(idx)
 	}
+
+	// Persist the updated state outside the lock.
+	go m.persistState()
 }
 
-func (m *Manager) captureOutput(idx int, r io.Reader) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), 256*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		svc := m.Services[idx]
-		svc.mu.Lock()
-		svc.Logs.Add(line)
-		svc.mu.Unlock()
-		m.send(LogMsg{Index: idx, Line: line})
+// startTailer launches a goroutine that polls the service's log file for new
+// bytes and feeds them to the ring buffer + TUI. Safe for both freshly-started
+// and adopted services — the child owns the fd either way, pairin just reads.
+//
+// Must be called with svc.mu held.
+func (m *Manager) startTailer(idx int) {
+	svc := m.Services[idx]
+
+	// Stop any previous tailer for this service before starting a new one.
+	if svc.tailCancel != nil {
+		svc.tailCancel()
 	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	svc.tailCancel = cancel
+	path := svc.LogFile
+
+	go m.tailFile(ctx, idx, path)
+}
+
+// tailFile opens the given log path and emits LogMsgs for every new line that
+// appears. It tolerates the file not yet existing and detects rotation (inode
+// change or truncation) by reopening.
+func (m *Manager) tailFile(ctx context.Context, idx int, path string) {
+	var (
+		f        *os.File
+		lastIno  uint64
+		pending  []byte
+		offset   int64
+	)
+	defer func() {
+		if f != nil {
+			f.Close()
+		}
+	}()
+
+	open := func() error {
+		if f != nil {
+			f.Close()
+			f = nil
+		}
+		nf, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		f = nf
+		if info, err := nf.Stat(); err == nil {
+			if sys, ok := info.Sys().(*syscall.Stat_t); ok {
+				lastIno = sys.Ino
+			}
+		}
+		offset = 0
+		pending = pending[:0]
+		return nil
+	}
+
+	readChunk := func() {
+		if f == nil {
+			return
+		}
+		info, err := f.Stat()
+		if err != nil {
+			return
+		}
+		// Detect rotation: inode changed, or file shrank below our offset.
+		if sys, ok := info.Sys().(*syscall.Stat_t); ok {
+			if lastIno != 0 && sys.Ino != lastIno {
+				_ = open()
+				return
+			}
+		}
+		if info.Size() < offset {
+			// Truncated (rare); start over.
+			offset = 0
+			pending = pending[:0]
+		}
+		if info.Size() == offset {
+			return
+		}
+		buf := make([]byte, 64*1024)
+		for {
+			n, err := f.ReadAt(buf, offset)
+			if n > 0 {
+				offset += int64(n)
+				pending = append(pending, buf[:n]...)
+				for {
+					nl := bytes.IndexByte(pending, '\n')
+					if nl < 0 {
+						break
+					}
+					line := string(pending[:nl])
+					pending = pending[nl+1:]
+					m.emitLine(idx, line)
+				}
+			}
+			if err == io.EOF || n == 0 {
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}
+
+	ticker := time.NewTicker(150 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if f == nil {
+			// File may not exist yet for fresh services — retry quietly.
+			_ = open()
+		}
+		readChunk()
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// emitLine feeds a log line into the service's ring buffer and sends it to the TUI.
+func (m *Manager) emitLine(idx int, line string) {
+	svc := m.Services[idx]
+	svc.mu.Lock()
+	svc.Logs.Add(line)
+	svc.mu.Unlock()
+	m.send(LogMsg{Index: idx, Line: line})
 }
 
 func (m *Manager) waitForExit(idx int, cmd *exec.Cmd, gen int) {
@@ -270,8 +549,11 @@ func (m *Manager) waitForExit(idx int, cmd *exec.Cmd, gen int) {
 	// Determine if we should auto-restart
 	shouldRestart := m.shouldAutoRestart(svc, exitedWithFailure)
 	svc.PID = 0
+	svc.PGID = 0
 	svc.cmd = nil
 	svc.mu.Unlock()
+
+	go m.persistState()
 
 	if shouldRestart && !m.quitting.Load() {
 		m.autoRestartService(idx, gen)
@@ -358,12 +640,25 @@ func (m *Manager) autoRestartService(idx int, originalGen int) {
 	m.startService(idx)
 }
 
-// RestartService stops and restarts a single service.
+// RestartService stops and restarts a single service. Adopted services can't
+// be restarted in phase 1 — pairin doesn't own the process tree, so re-exec
+// with the original environment isn't safe. Surface a hint in the log instead.
 func (m *Manager) RestartService(idx int) tea.Cmd {
 	return func() tea.Msg {
+		svc := m.Services[idx]
+		svc.mu.Lock()
+		adopted := svc.Adopted
+		svc.mu.Unlock()
+		if adopted {
+			svc.mu.Lock()
+			svc.Logs.Add("[pairin] restart not supported on adopted services; stop first, then let pairin re-launch")
+			svc.mu.Unlock()
+			m.send(LogMsg{Index: idx, Line: "[pairin] restart not supported on adopted services; stop first, then let pairin re-launch"})
+			return ServiceRestartedMsg{Index: idx}
+		}
+
 		m.stopService(idx)
 
-		svc := m.Services[idx]
 		svc.mu.Lock()
 		svc.Healthy = false
 		svc.RestartCount = 0 // reset auto-restart counter on manual restart
@@ -386,26 +681,42 @@ func (m *Manager) stopService(idx int) {
 	}
 	svc.Healthy = false
 
-	if svc.cmd == nil || svc.cmd.Process == nil {
+	adopted := svc.Adopted
+	pid := svc.PID
+	pgid := svc.PGID
+	cmd := svc.cmd
+
+	if pid == 0 && cmd == nil {
 		svc.mu.Unlock()
 		return
 	}
 
 	svc.Status = StatusStopped
 	svc.Logs.Add("[pairin] stopping...")
-	cmd := svc.cmd
 	svc.mu.Unlock()
 
-	// Send SIGINT to process group (mutex released so captureOutput can drain the pipe)
-	pgid, err := syscall.Getpgid(cmd.Process.Pid)
-	if err == nil {
+	// Signal the process group. Works the same for adopted and owned services.
+	if pgid == 0 && pid != 0 {
+		if p, err := syscall.Getpgid(pid); err == nil {
+			pgid = p
+		}
+	}
+	if pgid != 0 {
 		syscall.Kill(-pgid, syscall.SIGINT)
+	} else if pid != 0 {
+		syscall.Kill(pid, syscall.SIGINT)
 	}
 
-	// Wait up to 5 seconds for graceful shutdown
 	done := make(chan struct{})
 	go func() {
-		cmd.Process.Wait()
+		if cmd != nil && cmd.Process != nil {
+			cmd.Process.Wait()
+		} else if pid != 0 {
+			// Adopted: not our child, can't Wait. Poll instead.
+			for state.IsProcessAlive(pid) {
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
 		close(done)
 	}()
 
@@ -415,8 +726,11 @@ func (m *Manager) stopService(idx int) {
 		if pgid != 0 {
 			syscall.Kill(-pgid, syscall.SIGKILL)
 		}
-		cmd.Process.Kill() // fallback: always try direct kill
-
+		if cmd != nil && cmd.Process != nil {
+			cmd.Process.Kill()
+		} else if pid != 0 {
+			syscall.Kill(pid, syscall.SIGKILL)
+		}
 		select {
 		case <-done:
 		case <-time.After(3 * time.Second):
@@ -426,11 +740,22 @@ func (m *Manager) stopService(idx int) {
 
 	svc.mu.Lock()
 	svc.PID = 0
+	svc.PGID = 0
 	svc.cmd = nil
+	if svc.tailCancel != nil {
+		svc.tailCancel()
+		svc.tailCancel = nil
+	}
+	if adopted {
+		// Adopted services are one-shot: after a stop they exit the pool.
+		svc.Adopted = false
+	}
 	svc.mu.Unlock()
+	go m.persistState()
 }
 
-// StopAll stops all services in parallel. Called on quit.
+// StopAll stops all services in parallel. Called on quit. Clears state.json
+// and releases the pairin lock so a clean shutdown leaves no droppings behind.
 func (m *Manager) StopAll() {
 	m.quitting.Store(true)
 
@@ -452,6 +777,11 @@ func (m *Manager) StopAll() {
 	case <-done:
 	case <-time.After(15 * time.Second):
 		// Hard timeout: must exit regardless
+	}
+
+	if m.configPath != "" {
+		_ = state.Clear(m.configPath)
+		_ = state.ReleaseLock(m.configPath)
 	}
 
 	m.mu.Lock()

@@ -1,0 +1,5 @@
+# Build artifact
+/pairin
+
+# Per-project runtime state
+.pairin/

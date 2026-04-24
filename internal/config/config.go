@@ -12,6 +12,10 @@ import (
 type Config struct {
 	Project  Project   `toml:"project"`
 	Services []Service `toml:"services"`
+
+	// Path is the absolute path of the .pairinrc.toml that was loaded.
+	// Populated by Load; not parsed from TOML.
+	Path string `toml:"-"`
 }
 
 type Project struct {
@@ -77,6 +81,7 @@ func Load() (*Config, error) {
 	if err := toml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
+	cfg.Path = path
 
 	if len(cfg.Services) == 0 {
 		return nil, fmt.Errorf("no services defined in %s", path)
