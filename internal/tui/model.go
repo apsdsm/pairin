@@ -167,15 +167,11 @@ func (m DashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.mgr.RestartService(idx)
 
 	case "up", "k":
-		if m.view == viewFocus {
-			m.panes[m.focused].ScrollUp(3)
-		}
+		m.panes[m.activeIndex()].ScrollUp(3)
 		return m, nil
 
 	case "down", "j":
-		if m.view == viewFocus {
-			m.panes[m.focused].ScrollDown(3)
-		}
+		m.panes[m.activeIndex()].ScrollDown(3)
 		return m, nil
 
 	default:
