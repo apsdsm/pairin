@@ -12,8 +12,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var lsVerbose bool
-
 var lsCmd = &cobra.Command{
 	Use:   "ls",
 	Short: "List all running pairin supervisors on this host",
@@ -21,7 +19,6 @@ var lsCmd = &cobra.Command{
 }
 
 func init() {
-	lsCmd.Flags().BoolVarP(&lsVerbose, "verbose", "v", false, "show per-service breakdown")
 	rootCmd.AddCommand(lsCmd)
 }
 
@@ -43,55 +40,18 @@ func runLs(cmd *cobra.Command, args []string) error {
 		return insts[i].ConfigPath < insts[j].ConfigPath
 	})
 
-	if lsVerbose {
-		return renderVerbose(insts)
-	}
-	return renderTable(insts)
-}
-
-// renderTable prints one row per supervisor with a service-count summary.
-func renderTable(insts []state.Instance) error {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "PROJECT\tSUP PID\tUPTIME\tSTATUS\tCONFIG")
 	for _, inst := range insts {
-		summary := summarize(inst)
 		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\n",
 			projectLabel(inst),
 			inst.SupervisorPID,
 			formatUptime(time.Since(inst.StartedAt)),
-			summary,
+			summarize(inst),
 			inst.ConfigPath,
 		)
 	}
 	return tw.Flush()
-}
-
-// renderVerbose prints a block per supervisor with each service's state.
-func renderVerbose(insts []state.Instance) error {
-	for i, inst := range insts {
-		if i > 0 {
-			fmt.Println()
-		}
-		fmt.Printf("%s  (%s)\n", projectLabel(inst), inst.ConfigPath)
-		fmt.Printf("  supervisor=%d  uptime=%s  socket=%s\n",
-			inst.SupervisorPID, formatUptime(time.Since(inst.StartedAt)), inst.SocketPath)
-
-		snap, _ := state.Load(inst.ConfigPath)
-		if snap == nil || len(snap.Services) == 0 {
-			fmt.Println("  (no services recorded)")
-			continue
-		}
-		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		for _, s := range snap.Services {
-			alive := "dead"
-			if state.IsProcessAlive(s.PID) {
-				alive = "running"
-			}
-			fmt.Fprintf(tw, "  %s\t%s\tPID %d\t%s\n", s.Name, alive, s.PID, s.LogFile)
-		}
-		tw.Flush()
-	}
-	return nil
 }
 
 // summarize reads the per-project state.json (if any) and counts services
