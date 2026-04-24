@@ -119,12 +119,44 @@ func (s *Service) GetLines() []string {
 	return s.Logs.Lines()
 }
 
+// NewMirrorService creates a Service stub for client-side use. It has no
+// exec.Cmd and no Manager-owned goroutines; fields are mutated by the control
+// client as events arrive. The TUI treats it exactly like a live Service.
+func NewMirrorService(name, short, color, dir, cmd string, dependsOn []string, hasHealth bool, maxRestarts int) *Service {
+	svcCfg := config.Service{
+		Name:        name,
+		Short:       short,
+		Color:       color,
+		Dir:         dir,
+		Cmd:         cmd,
+		DependsOn:   dependsOn,
+		MaxRestarts: maxRestarts,
+	}
+	if hasHealth {
+		// A non-empty marker; the real probe runs in the supervisor. The TUI
+		// only needs to know whether to render a health indicator.
+		svcCfg.Healthcheck = "remote"
+	}
+	return &Service{
+		Config: svcCfg,
+		Status: StatusStopped,
+		Logs:   NewRingBuffer(ringBufferSize),
+	}
+}
+
+// Sink receives tea.Msg events from the Manager. *tea.Program satisfies this
+// for in-process delivery; a socket broadcaster satisfies it when the Manager
+// runs in a supervisor with remote TUI clients.
+type Sink interface {
+	Send(tea.Msg)
+}
+
 // Manager orchestrates all services.
 type Manager struct {
 	Services   []*Service
 	configPath string
 	nameToIdx  map[string]int
-	program    *tea.Program
+	sink       Sink
 	mu         sync.Mutex
 	err        error
 	quitting   atomic.Bool
@@ -152,10 +184,36 @@ func NewManager(cfg *config.Config) *Manager {
 // ConfigPath returns the path to the .pairinrc.toml the manager was built from.
 func (m *Manager) ConfigPath() string { return m.configPath }
 
-func (m *Manager) SetProgram(p *tea.Program) {
+// ServiceList returns the managed services. Used by the TUI via a shared
+// interface with the control.Client mirror.
+func (m *Manager) ServiceList() []*Service { return m.Services }
+
+// StartService starts a single service by index. Exposed for the control server.
+func (m *Manager) StartService(idx int) {
+	if idx < 0 || idx >= len(m.Services) {
+		return
+	}
+	m.startService(idx)
+}
+
+// StopService stops a single service by index. Exposed for the control server.
+func (m *Manager) StopService(idx int) {
+	if idx < 0 || idx >= len(m.Services) {
+		return
+	}
+	m.stopService(idx)
+}
+
+// SetSink installs the event sink (tea.Program or socket broadcaster).
+func (m *Manager) SetSink(s Sink) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.program = p
+	m.sink = s
+}
+
+// SetProgram is a compatibility alias for SetSink. *tea.Program satisfies Sink.
+func (m *Manager) SetProgram(p *tea.Program) {
+	m.SetSink(p)
 }
 
 func (m *Manager) Error() error {
@@ -166,10 +224,10 @@ func (m *Manager) Error() error {
 
 func (m *Manager) send(msg tea.Msg) {
 	m.mu.Lock()
-	p := m.program
+	s := m.sink
 	m.mu.Unlock()
-	if p != nil {
-		p.Send(msg)
+	if s != nil {
+		s.Send(msg)
 	}
 }
 
@@ -785,7 +843,7 @@ func (m *Manager) StopAll() {
 	}
 
 	m.mu.Lock()
-	m.program = nil
+	m.sink = nil
 	m.mu.Unlock()
 }
 

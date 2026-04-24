@@ -23,10 +23,12 @@ import (
 )
 
 const (
-	dirName      = ".pairin"
-	stateFile    = "state.json"
-	lockFile     = "pairin.pid"
-	logsSubdir   = "logs"
+	dirName       = ".pairin"
+	stateFile     = "state.json"
+	lockFile      = "supervisor.pid"
+	logsSubdir    = "logs"
+	socketFile    = "control.sock"
+	supervisorLog = "supervisor.log"
 )
 
 // Dir returns the .pairin state directory for a given config file path.
@@ -37,6 +39,21 @@ func Dir(configPath string) string {
 // LogsDir returns the per-project log directory.
 func LogsDir(configPath string) string {
 	return filepath.Join(Dir(configPath), logsSubdir)
+}
+
+// SocketPath returns the path to the supervisor's control socket.
+func SocketPath(configPath string) string {
+	return filepath.Join(Dir(configPath), socketFile)
+}
+
+// SupervisorLogPath returns the path where supervisor stdout/stderr is captured.
+func SupervisorLogPath(configPath string) string {
+	return filepath.Join(Dir(configPath), supervisorLog)
+}
+
+// LockPath returns the path to the supervisor lockfile.
+func LockPath(configPath string) string {
+	return filepath.Join(Dir(configPath), lockFile)
 }
 
 // EnsureDirs creates the state and logs directories if they don't exist.

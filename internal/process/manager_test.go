@@ -960,10 +960,10 @@ func TestStopAll_NilsProgramAfterShutdown(t *testing.T) {
 	m := newTestManager([]config.Service{
 		{Name: "a", Dir: tmpDir, Cmd: "sleep 60"},
 	})
-	// Simulate a program being set (use nil tea.Program via SetProgram is fine
-	// since send() already handles nil; we just check StopAll clears it)
+	// Simulate a sink being set (field was renamed from program to sink when
+	// the broadcaster abstraction landed). StopAll must clear it.
 	m.mu.Lock()
-	m.program = nil // already nil, but let's set a non-nil marker via direct field
+	m.sink = nil
 	m.mu.Unlock()
 
 	cmd := m.StartAll()
@@ -972,11 +972,11 @@ func TestStopAll_NilsProgramAfterShutdown(t *testing.T) {
 	m.StopAll()
 
 	m.mu.Lock()
-	p := m.program
+	p := m.sink
 	m.mu.Unlock()
 
 	if p != nil {
-		t.Error("expected program to be nil after StopAll")
+		t.Error("expected sink to be nil after StopAll")
 	}
 }
 

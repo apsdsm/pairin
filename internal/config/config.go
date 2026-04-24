@@ -71,7 +71,13 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	return LoadFrom(path)
+}
 
+// LoadFrom loads a specific .pairinrc.toml by absolute path. The supervisor
+// uses this because it's passed the path explicitly (the supervisor's cwd
+// isn't guaranteed to be the project dir).
+func LoadFrom(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", path, err)

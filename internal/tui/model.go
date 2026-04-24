@@ -17,9 +17,20 @@ const (
 	viewFocus
 )
 
+// Backend is everything the TUI needs from whatever's actually running
+// services — either a local process.Manager or a control.Client attached to
+// a remote supervisor. Both satisfy this interface.
+type Backend interface {
+	ServiceList() []*process.Service
+	StartAll() tea.Cmd
+	RestartService(idx int) tea.Cmd
+	StopAll()
+	SetProgram(p *tea.Program)
+}
+
 type DashboardModel struct {
 	cfg      *config.Config
-	mgr      *process.Manager
+	mgr      Backend
 	panes    []Pane
 	width    int
 	height   int
@@ -29,9 +40,10 @@ type DashboardModel struct {
 	quitting bool
 }
 
-func NewDashboardModel(cfg *config.Config, mgr *process.Manager) DashboardModel {
-	panes := make([]Pane, len(mgr.Services))
-	for i, svc := range mgr.Services {
+func NewDashboardModel(cfg *config.Config, mgr Backend) DashboardModel {
+	svcs := mgr.ServiceList()
+	panes := make([]Pane, len(svcs))
+	for i, svc := range svcs {
 		panes[i] = NewPane(svc)
 	}
 
@@ -122,7 +134,7 @@ func (m DashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		idx := m.activeIndex()
 		// Clear pane lines for the restarting service
-		m.panes[idx] = NewPane(m.mgr.Services[idx])
+		m.panes[idx] = NewPane(m.mgr.ServiceList()[idx])
 		m.recalcPaneSizes()
 		return m, m.mgr.RestartService(idx)
 
@@ -232,7 +244,7 @@ func (m DashboardModel) renderHeader() string {
 	title := HeaderStyle.Render(m.cfg.Project.Name)
 
 	var indicators []string
-	for _, svc := range m.mgr.Services {
+	for _, svc := range m.mgr.ServiceList() {
 		color := ServiceColor(svc.Config.Color)
 		var dot string
 		switch svc.Status {
@@ -271,7 +283,7 @@ func (m DashboardModel) renderFooter() string {
 	}
 
 	var parts []string
-	for i, svc := range m.mgr.Services {
+	for i, svc := range m.mgr.ServiceList() {
 		parts = append(parts, fmt.Sprintf("%d %s", i+1, svc.Config.Short))
 	}
 
