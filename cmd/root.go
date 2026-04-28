@@ -18,6 +18,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// detachFlag is set by `-d` / `--detach` on the root command and `pairin up`.
+// When true, runUp spawns (or confirms) the supervisor and exits without
+// attaching a TUI, mirroring `docker compose up -d`.
+var detachFlag bool
+
 var rootCmd = &cobra.Command{
 	Use:           "pairin",
 	Short:         "Local development process manager",
@@ -26,21 +31,30 @@ var rootCmd = &cobra.Command{
 	SilenceErrors: false,
 }
 
+func init() {
+	rootCmd.Flags().BoolVarP(&detachFlag, "detach", "d", false, "start the supervisor in the background and exit without attaching a TUI")
+}
+
 func Execute() error {
 	return rootCmd.Execute()
 }
 
-// runUp implements the default command: if a supervisor is already running
-// in this project, attach a TUI to it. Otherwise, prompt about any stale
-// state, spawn a detached supervisor, and attach a TUI once the socket is up.
+// runUp implements the default command. If a supervisor is already running
+// in this project, attach a TUI to it (or print a status line and exit if
+// --detach is set). Otherwise, prompt about any stale state, spawn a
+// detached supervisor, and either attach a TUI or exit cleanly.
 func runUp(cmd *cobra.Command, args []string) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	// Case 1: supervisor already running. Just attach.
+	// Case 1: supervisor already running.
 	if holder := state.LockHolder(cfg.Path); holder > 0 && state.IsProcessAlive(holder) {
+		if detachFlag {
+			fmt.Printf("Supervisor already running for this project (PID %d). Use `pairin attach` to view logs or `pairin down` to stop.\n", holder)
+			return nil
+		}
 		return attachTUI(cfg)
 	}
 
@@ -50,12 +64,17 @@ func runUp(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Case 3: spawn a fresh (or adopting) supervisor and attach.
+	// Case 3: spawn a fresh (or adopting) supervisor.
 	if err := spawnSupervisor(cfg.Path, adoptRequested); err != nil {
 		return err
 	}
 	if err := waitForSupervisor(cfg.Path, 5*time.Second); err != nil {
 		return err
+	}
+	if detachFlag {
+		holder := state.LockHolder(cfg.Path)
+		fmt.Printf("Supervisor started (PID %d). Use `pairin attach` to view logs or `pairin down` to stop.\n", holder)
+		return nil
 	}
 	return attachTUI(cfg)
 }

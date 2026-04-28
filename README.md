@@ -2,7 +2,7 @@
 
 A terminal dashboard for running multiple local development services in parallel. Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
-pairin reads a `.pairinrc.toml` config file from the current directory (or any parent directory), starts all defined services, and displays their logs in a split-pane TUI.
+pairin reads a `.pairinrc.toml` config file from the current directory (or any parent directory), spawns a detached supervisor that runs all defined services, and attaches a split-pane TUI to it. The TUI can be detached and reattached without restarting the services.
 
 <p align="center">
   <img src="pairin.jpeg" alt="pairin" width="400">
@@ -45,6 +45,22 @@ Then run:
 ```bash
 pairin
 ```
+
+## Subcommands
+
+| Command                     | Action                                                                       |
+|-----------------------------|------------------------------------------------------------------------------|
+| `pairin` (or `pairin up`)   | Start the supervisor for this project (or attach if one is already running)  |
+| `pairin -d` (or `pairin up -d`) | Start the supervisor in the background and exit without attaching a TUI |
+| `pairin attach`             | Attach a TUI to a supervisor that's already running for this project         |
+| `pairin down`               | Stop all services and the supervisor for this project                        |
+| `pairin ls`                 | List every running pairin supervisor on this host                            |
+| `pairin status`             | Show per-service status across every running supervisor                      |
+| `pairin version`            | Print the version                                                            |
+
+If a previous supervisor exited without cleaning up, `pairin up` detects the orphaned services and prompts you to **adopt** them, **restart** them fresh, or **quit**.
+
+`-d` / `--detach` is idempotent: if a supervisor is already running for this project, it prints the existing PID and exits without doing anything.
 
 ## Configuration
 
@@ -111,20 +127,23 @@ max_restarts = 5
 
 ## Keyboard Shortcuts
 
-| Key          | Action                          |
-|--------------|---------------------------------|
-| `1`-`9`      | Focus a service pane full-screen |
-| `a`          | Return to split view            |
-| `tab`        | Cycle active pane forward       |
-| `shift+tab`  | Cycle active pane backward      |
-| `r`          | Restart the active service      |
-| `up` / `k`   | Scroll up (focused view)        |
-| `down` / `j` | Scroll down (focused view)      |
-| `q`          | Quit (stops all services)       |
+| Key          | Action                                                       |
+|--------------|--------------------------------------------------------------|
+| `1`-`9`      | Focus a service pane full-screen                             |
+| `z`          | Toggle zoom (split view ↔ focus on the active pane)          |
+| `tab`        | Cycle active pane forward                                    |
+| `shift+tab`  | Cycle active pane backward                                   |
+| `r`          | Restart the active service                                   |
+| `up` / `k`   | Scroll up                                                    |
+| `down` / `j` | Scroll down                                                  |
+| `q` / `ctrl+c` | Detach the TUI (services and supervisor keep running)      |
+| `d`          | Shut down: stop every service and exit the supervisor        |
 
 ## How It Works
 
-- Each service runs as a subprocess in its own process group
-- stdout and stderr are merged and captured into a ring buffer (1000 lines)
-- On restart, the process receives SIGINT with a 5-second grace period before SIGKILL
-- Git branch is detected automatically for each service directory
+- Running `pairin` spawns a detached supervisor process (its own session leader) and attaches a TUI client to it over a unix socket at `.pairin/control.sock`. Closing the TUI with `q` leaves the supervisor and its services running; reattach later with `pairin` or `pairin attach`. Use `d` (or `pairin down`) to stop everything.
+- Each service runs as a subprocess in its own process group, so the supervisor can clean up child processes on stop.
+- Per-service stdout and stderr are merged into both an in-memory ring buffer (1000 lines, used by the TUI) and a rotating log file at `.pairin/logs/<service>.log` (rotated to `.log.1` once it exceeds 10 MiB).
+- The supervisor announces itself in a host-wide registry (under `$XDG_STATE_HOME/pairin/instances/`, defaulting to `~/.local/state/pairin/instances/`), which is what `pairin ls` and `pairin status` read.
+- On restart, the process receives SIGINT with a 5-second grace period before SIGKILL.
+- Git branch is detected automatically for each service directory.

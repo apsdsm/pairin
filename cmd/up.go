@@ -11,5 +11,6 @@ var upCmd = &cobra.Command{
 }
 
 func init() {
+	upCmd.Flags().BoolVarP(&detachFlag, "detach", "d", false, "start the supervisor in the background and exit without attaching a TUI")
 	rootCmd.AddCommand(upCmd)
 }
