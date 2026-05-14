@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/apsdsm/pairin/internal/config"
 	"github.com/apsdsm/pairin/internal/state"
 	"github.com/spf13/cobra"
 )
@@ -15,11 +14,12 @@ var attachCmd = &cobra.Command{
 }
 
 func init() {
+	attachCmd.Flags().StringVarP(&configFlag, "config", "c", "", "path to a .pairinrc.toml (defaults to searching cwd up to root)")
 	rootCmd.AddCommand(attachCmd)
 }
 
 func runAttach(cmd *cobra.Command, args []string) error {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}

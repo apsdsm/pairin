@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/apsdsm/pairin/internal/config"
 	"github.com/apsdsm/pairin/internal/control"
 	"github.com/apsdsm/pairin/internal/state"
 	"github.com/spf13/cobra"
@@ -17,11 +16,12 @@ var downCmd = &cobra.Command{
 }
 
 func init() {
+	downCmd.Flags().StringVarP(&configFlag, "config", "c", "", "path to a .pairinrc.toml (defaults to searching cwd up to root)")
 	rootCmd.AddCommand(downCmd)
 }
 
 func runDown(cmd *cobra.Command, args []string) error {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}

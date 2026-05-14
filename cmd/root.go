@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -23,6 +24,11 @@ import (
 // attaching a TUI, mirroring `docker compose up -d`.
 var detachFlag bool
 
+// configFlag is set by `-c` / `--config` on the user-facing commands that
+// need a project config (root/up, attach, down). Empty means "search from
+// cwd up to root for .pairinrc.toml".
+var configFlag string
+
 var rootCmd = &cobra.Command{
 	Use:           "pairin",
 	Short:         "Local development process manager",
@@ -33,6 +39,21 @@ var rootCmd = &cobra.Command{
 
 func init() {
 	rootCmd.Flags().BoolVarP(&detachFlag, "detach", "d", false, "start the supervisor in the background and exit without attaching a TUI")
+	rootCmd.Flags().StringVarP(&configFlag, "config", "c", "", "path to a .pairinrc.toml (defaults to searching cwd up to root)")
+}
+
+// loadConfig loads the project config, honoring the --config flag if set.
+// Relative paths are resolved against the current working directory; the
+// supervisor is always handed an absolute path so its own cwd doesn't matter.
+func loadConfig() (*config.Config, error) {
+	if configFlag == "" {
+		return config.Load()
+	}
+	abs, err := filepath.Abs(configFlag)
+	if err != nil {
+		return nil, fmt.Errorf("resolving --config path: %w", err)
+	}
+	return config.LoadFrom(abs)
 }
 
 func Execute() error {
@@ -44,7 +65,7 @@ func Execute() error {
 // --detach is set). Otherwise, prompt about any stale state, spawn a
 // detached supervisor, and either attach a TUI or exit cleanly.
 func runUp(cmd *cobra.Command, args []string) error {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}

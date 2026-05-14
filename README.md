@@ -62,6 +62,15 @@ If a previous supervisor exited without cleaning up, `pairin up` detects the orp
 
 `-d` / `--detach` is idempotent: if a supervisor is already running for this project, it prints the existing PID and exits without doing anything.
 
+### `-c` / `--config`
+
+`pairin`, `pairin up`, `pairin attach`, and `pairin down` accept `-c <path>` to point at a specific `.pairinrc.toml` instead of searching from the current directory. Relative paths are resolved against the current working directory. Each config's supervisor, socket, state, and logs live under `<config-dir>/.pairin/`, so configs in different directories don't interfere.
+
+```bash
+pairin -c ../other-project/.pairinrc.toml
+pairin attach -c /path/to/.pairinrc.toml
+```
+
 ## Configuration
 
 ### `[project]`
