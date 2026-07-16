@@ -13,5 +13,6 @@ var upCmd = &cobra.Command{
 func init() {
 	upCmd.Flags().BoolVarP(&detachFlag, "detach", "d", false, "start the supervisor in the background and exit without attaching a TUI")
 	upCmd.Flags().StringVarP(&configFlag, "config", "c", "", "path to a .pairinrc.toml (defaults to searching cwd up to root)")
+	upCmd.Flags().BoolVar(&clearLogsFlag, "clear-logs", false, "delete existing service logs before starting, so the TUI doesn't preload old history")
 	rootCmd.AddCommand(upCmd)
 }

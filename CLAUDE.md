@@ -121,6 +121,7 @@ max_restarts = 5
 
 - The supervisor is spawned with `Setsid: true` (new session leader), so it survives the parent TUI exiting and SSH disconnects.
 - `pairin -d` / `pairin up -d` spawns (or confirms) the supervisor and exits immediately without attaching a TUI — same end state as starting normally and pressing `q`. Idempotent: if a supervisor is already up, it prints the existing PID and returns.
+- `pairin --clear-logs` / `pairin up --clear-logs` deletes everything in `.pairin/logs/` (including rotated `.log.1` files) before spawning the supervisor, so the TUI doesn't preload old history. Errors out if a supervisor is already running, since its open fds would keep writing to the unlinked files.
 - `q` / `ctrl+c` in the TUI is **detach**: it tears down the client, leaves the supervisor and all services running. `d` is **shut down**: sends `ReqShutdown`, supervisor calls `StopAll` and exits. `pairin down` is the out-of-TUI equivalent of `d`.
 - If `pairin up` finds a stale `supervisor.pid` whose process is gone but services in `state.json` are still alive, it prompts: **A**dopt (spawn a new supervisor with `--adopt`, which calls `mgr.AdoptService` per surviving PID/PGID), **R**estart (SIGINT then SIGKILL the orphans, clear state), or **Q**uit.
 - Adopted services have `svc.Adopted = true`. The manager skips `exec.Command.Start` for them and instead resumes log capture and healthchecking against the existing PID.
