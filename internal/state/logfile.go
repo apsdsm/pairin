@@ -18,6 +18,30 @@ func LogFilePath(configPath, serviceName string) string {
 	return filepath.Join(LogsDir(configPath), serviceName+".log")
 }
 
+// ClearLogs removes every file in the project's logs directory, including
+// rotated .log.1 files. It must only be called when no supervisor is running,
+// since a live supervisor holds open fds to these files and would keep
+// writing to the unlinked inodes.
+func ClearLogs(configPath string) error {
+	dir := LogsDir(configPath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // RotateIfLarge renames <path> to <path>.1 when it exceeds MaxLogBytes. Any
 // existing <path>.1 is overwritten. If the file does not exist or is smaller
 // than the threshold, no action is taken.

@@ -29,6 +29,11 @@ var detachFlag bool
 // cwd up to root for .pairinrc.toml".
 var configFlag string
 
+// clearLogsFlag is set by `--clear-logs` on the root command and `pairin up`.
+// When true, runUp wipes .pairin/logs/ before spawning the supervisor so the
+// TUI doesn't preload history from previous sessions.
+var clearLogsFlag bool
+
 var rootCmd = &cobra.Command{
 	Use:           "pairin",
 	Short:         "Local development process manager",
@@ -40,6 +45,7 @@ var rootCmd = &cobra.Command{
 func init() {
 	rootCmd.Flags().BoolVarP(&detachFlag, "detach", "d", false, "start the supervisor in the background and exit without attaching a TUI")
 	rootCmd.Flags().StringVarP(&configFlag, "config", "c", "", "path to a .pairinrc.toml (defaults to searching cwd up to root)")
+	rootCmd.Flags().BoolVar(&clearLogsFlag, "clear-logs", false, "delete existing service logs before starting, so the TUI doesn't preload old history")
 }
 
 // loadConfig loads the project config, honoring the --config flag if set.
@@ -72,6 +78,9 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 	// Case 1: supervisor already running.
 	if holder := state.LockHolder(cfg.Path); holder > 0 && state.IsProcessAlive(holder) {
+		if clearLogsFlag {
+			return fmt.Errorf("cannot clear logs while a supervisor is running (PID %d); run `pairin down` first", holder)
+		}
 		if detachFlag {
 			fmt.Printf("Supervisor already running for this project (PID %d). Use `pairin attach` to view logs or `pairin down` to stop.\n", holder)
 			return nil
@@ -85,7 +94,14 @@ func runUp(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Case 3: spawn a fresh (or adopting) supervisor.
+	// Case 3: spawn a fresh (or adopting) supervisor. Logs are cleared here,
+	// before the supervisor exists, so no open fds point at the deleted files.
+	// Adopted services simply recreate theirs on the next write (O_CREATE|O_APPEND).
+	if clearLogsFlag {
+		if err := state.ClearLogs(cfg.Path); err != nil {
+			return fmt.Errorf("clearing logs: %w", err)
+		}
+	}
 	if err := spawnSupervisor(cfg.Path, adoptRequested); err != nil {
 		return err
 	}

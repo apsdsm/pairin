@@ -62,6 +62,8 @@ If a previous supervisor exited without cleaning up, `pairin up` detects the orp
 
 `-d` / `--detach` is idempotent: if a supervisor is already running for this project, it prints the existing PID and exits without doing anything.
 
+`--clear-logs` (on `pairin` / `pairin up`) deletes the existing service logs in `.pairin/logs/` before starting, so the TUI opens with fresh panes instead of preloading history from previous sessions. It refuses to run while a supervisor is already up — stop it with `pairin down` first.
+
 ### `-c` / `--config`
 
 `pairin`, `pairin up`, `pairin attach`, and `pairin down` accept `-c <path>` to point at a specific `.pairinrc.toml` instead of searching from the current directory. Relative paths are resolved against the current working directory. Each config's supervisor, socket, state, and logs live under `<config-dir>/.pairin/`, so configs in different directories don't interfere.
