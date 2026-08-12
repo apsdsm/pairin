@@ -42,6 +42,12 @@ type Client struct {
 	enc  *json.Encoder
 	done chan struct{}
 	err  error
+
+	// Desired log subscription, remembered so it can be re-sent after a
+	// reconnect — subscription is per-connection state on the server, and a
+	// supervisor restart would otherwise silently resume the full firehose.
+	logMode     LogMode
+	logServices []string
 }
 
 // snapshotTimeout bounds how long we wait for a supervisor to describe itself
@@ -89,6 +95,7 @@ func (c *Client) Reconnect() error {
 
 	select {
 	case <-ready:
+		c.resendSubscription()
 		return nil
 	case <-done:
 		if err := c.Error(); err != nil {
@@ -150,6 +157,23 @@ func (c *Client) RestartService(idx int) tea.Cmd {
 	}
 }
 
+// RequestRestart asks the supervisor to restart a service by name. Unlike
+// RestartService it isn't tied to the TUI's pane indices, which is what the
+// fleet hub needs — it addresses services across several supervisors at once.
+func (c *Client) RequestRestart(service string) error {
+	return c.send(Request{Kind: ReqRestart, Service: service})
+}
+
+// RequestStop asks the supervisor to stop a service by name.
+func (c *Client) RequestStop(service string) error {
+	return c.send(Request{Kind: ReqStop, Service: service})
+}
+
+// RequestStart asks the supervisor to start a service by name.
+func (c *Client) RequestStart(service string) error {
+	return c.send(Request{Kind: ReqStart, Service: service})
+}
+
 // StopAll in client mode does nothing to the services themselves — 'q' in
 // the TUI becomes a detach rather than a shutdown. Use Shutdown for the
 // explicit "kill everything" path.
@@ -158,6 +182,26 @@ func (c *Client) StopAll() {}
 // Shutdown asks the supervisor to stop all services and exit.
 func (c *Client) Shutdown() error {
 	return c.send(Request{Kind: ReqShutdown})
+}
+
+// SubscribeLogs narrows (or restores) which services stream their log lines to
+// this client. The choice is remembered across reconnects.
+func (c *Client) SubscribeLogs(mode LogMode, services ...string) error {
+	c.mu.Lock()
+	c.logMode = mode
+	c.logServices = append([]string(nil), services...)
+	c.mu.Unlock()
+	return c.send(Request{Kind: ReqSubscribe, LogMode: mode, Services: services})
+}
+
+func (c *Client) resendSubscription() {
+	c.mu.Lock()
+	mode, services := c.logMode, append([]string(nil), c.logServices...)
+	c.mu.Unlock()
+	if mode == LogsAll && len(services) == 0 {
+		return
+	}
+	_ = c.send(Request{Kind: ReqSubscribe, LogMode: mode, Services: services})
 }
 
 // Error returns the last fatal error seen by the read loop, if any.

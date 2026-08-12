@@ -19,17 +19,37 @@ import (
 type RequestKind string
 
 const (
-	ReqSnapshot RequestKind = "snapshot"
-	ReqRestart  RequestKind = "restart"
-	ReqStop     RequestKind = "stop"
-	ReqStart    RequestKind = "start"
-	ReqShutdown RequestKind = "shutdown"
+	ReqSnapshot  RequestKind = "snapshot"
+	ReqRestart   RequestKind = "restart"
+	ReqStop      RequestKind = "stop"
+	ReqStart     RequestKind = "start"
+	ReqShutdown  RequestKind = "shutdown"
+	ReqSubscribe RequestKind = "subscribe"
+)
+
+// LogMode controls which log lines a client wants streamed to it.
+//
+// The zero value means "all", so a client that never subscribes behaves exactly
+// as it did before this existed. The fleet dashboard subscribes to none while
+// it's showing a grid of service names — with a socket open per project it
+// would otherwise pull every log line on the host to render text it isn't
+// displaying — and narrows to a single service when zooming into its logs.
+type LogMode string
+
+const (
+	LogsAll  LogMode = ""     // every service (default)
+	LogsNone LogMode = "none" // status and health only
+	LogsOnly LogMode = "only" // just the named services
 )
 
 // Request is the envelope for all client-to-supervisor messages.
 type Request struct {
 	Kind    RequestKind `json:"kind"`
 	Service string      `json:"service,omitempty"`
+
+	// Subscribe only.
+	LogMode  LogMode  `json:"log_mode,omitempty"`
+	Services []string `json:"services,omitempty"`
 }
 
 // ----- Supervisor -> Client events -----

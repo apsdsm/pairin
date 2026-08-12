@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"sync"
 	"path/filepath"
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/apsdsm/pairin/internal/config"
 	"github.com/apsdsm/pairin/internal/process"
 )
@@ -247,3 +249,122 @@ func TestConcurrentMirrorAccess(t *testing.T) {
 	}
 	<-done
 }
+
+// TestLogSubscriptionFilters covers the protocol addition the fleet dashboard
+// depends on: with a socket open per project, streaming every log line on the
+// host to render a grid of service names would be pure waste.
+func TestLogSubscriptionFilters(t *testing.T) {
+	srv, _, sock := newTestServer(t)
+
+	client, err := Dial(sock)
+	if err != nil {
+		t.Fatalf("dialing: %v", err)
+	}
+	defer client.Close()
+
+	var mu sync.Mutex
+	var logs, statuses int
+	client.SetSink(sinkFunc(func(msg tea.Msg) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch msg.(type) {
+		case process.LogMsg:
+			logs++
+		case process.StatusMsg:
+			statuses++
+		}
+	}))
+
+	counts := func() (int, int) {
+		mu.Lock()
+		defer mu.Unlock()
+		return logs, statuses
+	}
+
+	if err := client.SubscribeLogs(LogsNone); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	// The subscription is applied on the server's read loop; give it a moment.
+	time.Sleep(100 * time.Millisecond)
+
+	srv.broadcast(Event{Kind: EvtLog, Log: &LogEvent{Service: "alpha", Line: "hidden"}})
+	srv.broadcast(Event{Kind: EvtStatus, Status: &StatusEvent{Service: "alpha", Status: "running"}})
+	time.Sleep(200 * time.Millisecond)
+
+	if gotLogs, gotStatuses := counts(); gotLogs != 0 || gotStatuses != 1 {
+		t.Errorf("with LogsNone: %d logs, %d statuses; want 0 and 1", gotLogs, gotStatuses)
+	}
+
+	// Narrowing to one service must pass that service and no other.
+	if err := client.SubscribeLogs(LogsOnly, "alpha"); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	srv.broadcast(Event{Kind: EvtLog, Log: &LogEvent{Service: "alpha", Line: "wanted"}})
+	srv.broadcast(Event{Kind: EvtLog, Log: &LogEvent{Service: "beta", Line: "unwanted"}})
+	time.Sleep(200 * time.Millisecond)
+
+	if gotLogs, _ := counts(); gotLogs != 1 {
+		t.Errorf("with LogsOnly(alpha): %d logs, want 1", gotLogs)
+	}
+}
+
+// A subscription is per-connection server state, so a reconnect that didn't
+// re-send it would silently resume the full firehose.
+func TestSubscriptionSurvivesReconnect(t *testing.T) {
+	srv, mgr, sock := newTestServer(t)
+
+	client, err := Dial(sock)
+	if err != nil {
+		t.Fatalf("dialing: %v", err)
+	}
+	defer client.Close()
+
+	if err := client.SubscribeLogs(LogsNone); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	srv.Shutdown()
+	<-client.Done()
+
+	cfg := &config.Config{
+		Project:  config.Project{Name: "test"},
+		Services: []config.Service{{Name: "alpha", Cmd: "true"}, {Name: "beta", Cmd: "true"}},
+		Path:     filepath.Join(filepath.Dir(sock), ".pairinrc.toml"),
+	}
+	srv2 := NewServer(mgr, cfg)
+	if err := srv2.Start(sock); err != nil {
+		t.Fatalf("restarting server: %v", err)
+	}
+	defer srv2.Shutdown()
+
+	var mu sync.Mutex
+	logs := 0
+	client.SetSink(sinkFunc(func(msg tea.Msg) {
+		if _, ok := msg.(process.LogMsg); ok {
+			mu.Lock()
+			logs++
+			mu.Unlock()
+		}
+	}))
+
+	if err := client.Reconnect(); err != nil {
+		t.Fatalf("reconnect: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	srv2.broadcast(Event{Kind: EvtLog, Log: &LogEvent{Service: "alpha", Line: "should not arrive"}})
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if logs != 0 {
+		t.Errorf("received %d log events after reconnect; the subscription was not re-sent", logs)
+	}
+}
+
+// sinkFunc adapts a function to process.Sink.
+type sinkFunc func(tea.Msg)
+
+func (f sinkFunc) Send(msg tea.Msg) { f(msg) }

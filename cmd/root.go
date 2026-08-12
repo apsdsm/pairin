@@ -2,10 +2,8 @@ package cmd
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
@@ -17,6 +15,7 @@ import (
 	"github.com/apsdsm/pairin/internal/config"
 	"github.com/apsdsm/pairin/internal/control"
 	"github.com/apsdsm/pairin/internal/crash"
+	"github.com/apsdsm/pairin/internal/launcher"
 	"github.com/apsdsm/pairin/internal/state"
 	"github.com/apsdsm/pairin/internal/tui"
 	"github.com/spf13/cobra"
@@ -181,10 +180,10 @@ func runUp(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("clearing logs: %w", err)
 		}
 	}
-	if err := spawnSupervisor(cfg.Path, adoptRequested); err != nil {
+	if err := launcher.Spawn(cfg.Path, adoptRequested); err != nil {
 		return err
 	}
-	if err := waitForSupervisor(cfg.Path, 5*time.Second); err != nil {
+	if err := launcher.WaitReady(cfg.Path, launcher.DefaultTimeout); err != nil {
 		return err
 	}
 	if detachFlag {
@@ -239,65 +238,6 @@ func runProgram(p *tea.Program) (err error) {
 	return nil
 }
 
-// spawnSupervisor re-execs this binary with the hidden `supervisor` subcommand
-// in a new session so the supervisor survives the parent TUI's exit.
-func spawnSupervisor(configPath string, adopt bool) error {
-	self, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("locating pairin binary: %w", err)
-	}
-
-	args := []string{"supervisor", "--config", configPath}
-	if adopt {
-		args = append(args, "--adopt")
-	}
-
-	if err := state.EnsureDirs(configPath); err != nil {
-		return err
-	}
-	logF, err := os.OpenFile(state.SupervisorLogPath(configPath), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
-	if err != nil {
-		return fmt.Errorf("opening supervisor log: %w", err)
-	}
-	fmt.Fprintf(logF, "\n--- supervisor spawning %s ---\n", time.Now().Format(time.RFC3339))
-
-	cmd := exec.Command(self, args...)
-	cmd.Stdin = nil
-	cmd.Stdout = logF
-	cmd.Stderr = logF
-	// Setsid: true makes the child a session leader so it doesn't receive
-	// SIGHUP when the parent TUI exits (detach path) or the tty closes (SSH drop).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-
-	if err := cmd.Start(); err != nil {
-		logF.Close()
-		return fmt.Errorf("starting supervisor: %w", err)
-	}
-	// Parent releases its copy of the log fd; supervisor has its own.
-	logF.Close()
-	// We don't Wait — the supervisor runs independently. The OS will reap it
-	// via init when the time comes.
-	go func() { _ = cmd.Process.Release() }()
-	return nil
-}
-
-// waitForSupervisor polls for the control socket to become connectable.
-func waitForSupervisor(configPath string, timeout time.Duration) error {
-	sock := state.SocketPath(configPath)
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(sock); err == nil {
-			// Socket file exists; try a connect to be sure.
-			client, dErr := control.Dial(sock)
-			if dErr == nil {
-				_ = client.Close()
-				return nil
-			}
-		}
-		time.Sleep(75 * time.Millisecond)
-	}
-	return errors.New("supervisor did not become ready in time (check .pairin/supervisor.log)")
-}
 
 // resolveStaleState handles the case where a previous supervisor is gone but
 // its services may still be running. Returns true if the user wants the new

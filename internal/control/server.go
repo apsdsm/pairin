@@ -193,6 +193,12 @@ func (s *Server) handle(c *serverClient) {
 		if err := dec.Decode(&req); err != nil {
 			return
 		}
+		// Subscription is per-client state, so it's handled here rather than in
+		// dispatch, which acts on the supervisor as a whole.
+		if req.Kind == ReqSubscribe {
+			c.setSubscription(req.LogMode, req.Services)
+			continue
+		}
 		s.dispatch(req)
 	}
 }
@@ -294,9 +300,41 @@ type serverClient struct {
 	// Shutdown writes its farewell event directly from the caller's goroutine.
 	wmu sync.Mutex
 
-	mu      sync.Mutex
-	dropped int
-	resync  bool
+	mu          sync.Mutex
+	dropped     int
+	resync      bool
+	logMode     LogMode
+	logServices map[string]bool
+}
+
+// setSubscription records which log lines this client wants. Status and health
+// events are never filtered — they're what the client's view is built from.
+func (c *serverClient) setSubscription(mode LogMode, services []string) {
+	set := make(map[string]bool, len(services))
+	for _, s := range services {
+		set[s] = true
+	}
+	c.mu.Lock()
+	c.logMode = mode
+	c.logServices = set
+	c.mu.Unlock()
+}
+
+// wants reports whether an event passes this client's log subscription.
+func (c *serverClient) wants(evt Event) bool {
+	if evt.Kind != EvtLog {
+		return true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch c.logMode {
+	case LogsNone:
+		return false
+	case LogsOnly:
+		return evt.Log != nil && c.logServices[evt.Log.Service]
+	default:
+		return true
+	}
 }
 
 func newServerClient(conn net.Conn, snapshot func() Snapshot) *serverClient {
@@ -318,6 +356,12 @@ func (c *serverClient) enqueue(evt Event) {
 	case <-c.done:
 		return
 	default:
+	}
+
+	// Filter before queueing, so unwanted logs don't consume queue space and
+	// push out events the client actually asked for.
+	if !c.wants(evt) {
+		return
 	}
 
 	select {
