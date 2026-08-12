@@ -267,7 +267,7 @@ output but never silently deleted.
 on — `--config` > catalog name > search from cwd. The fleet dashboard's "start this project" action
 should go through the catalog the same way rather than growing its own path handling.
 
-### Phase 3 — The hub
+### Phase 3 — The hub — **shipped on `fleet-stability`**
 
 New `internal/hub/hub.go`:
 
@@ -306,7 +306,7 @@ type Msg struct {           // every client event, tagged with its origin
 **Done when:** a headless test can hold three temp-dir supervisors and observe tagged status events
 from all of them.
 
-### Phase 4 — The fleet dashboard *(fixes pain 1)*
+### Phase 4 — The fleet dashboard *(fixes pain 1)* — **shipped on `fleet-stability`**
 
 `internal/tui/fleet.go` — `FleetModel` over a `Hub`, rendering `Grid` once per project group:
 
@@ -335,6 +335,20 @@ from all of them.
 - Groups collapse with `space`; `/` filters across all projects at once.
 
 **Done when:** you can close tmux.
+
+**Outcome.** Landed as `pairin dash`. Verified against a live host — the dashboard rendered the
+two test projects, a registered-but-stopped one showing its service names in grey, and the real
+JJC2 and LGC projects with `◍` (running, failing its healthcheck) and `⋯` (waiting on a dependency)
+correctly distinguished at one character wide.
+
+Points settled while building it:
+
+- `GridCell.Key` carries `instanceID + NUL + service`, because two projects each having a `web` is
+  the normal case, not the edge case.
+- `q` closes the dashboard and touches nothing. Stopping is always an explicit key (`x`, `S`). A
+  dashboard that could take down a project by being closed would be unusable.
+- Starting a project goes through `internal/launcher`, the same path as the CLI, with orphan
+  adoption automatic — there's no terminal to prompt in, and adopting doesn't destroy work.
 
 ### Phase 5 — Polish
 

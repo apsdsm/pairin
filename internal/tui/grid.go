@@ -35,6 +35,12 @@ type Grid struct {
 
 // GridCell is one service.
 type GridCell struct {
+	// Key identifies the cell uniquely across the whole grid. It matters in the
+	// fleet view, where two projects may each have a service called "web";
+	// within a single project, names are already unique and Key can be left
+	// empty, in which case Name is used.
+	Key string
+
 	Name         string
 	Color        string
 	Status       process.Status
@@ -42,6 +48,14 @@ type GridCell struct {
 	HasHealth    bool
 	RestartCount int
 	MaxRestarts  int
+}
+
+// key is the cell's identity for selection purposes.
+func (c GridCell) key() string {
+	if c.Key != "" {
+		return c.Key
+	}
+	return c.Name
 }
 
 // GridGroup is a titled set of cells — one project's worth.
@@ -78,10 +92,22 @@ func (g *Grid) SetSize(width, height int) {
 	g.height = height
 }
 
-// SetGroups replaces the grid's contents, clamping the selection so it stays
-// on a real cell when services appear or disappear.
+// SetGroups replaces the grid's contents, keeping the selection on the same
+// cell where possible. Contents are rebuilt on every update, and in the fleet
+// view whole projects appear and disappear as supervisors come and go — a
+// selection tracked by position would wander under the user's cursor.
 func (g *Grid) SetGroups(groups []GridGroup) {
+	previous := g.SelectedKey()
 	g.groups = groups
+
+	if previous != "" {
+		for i, c := range g.visibleCells() {
+			if c.key() == previous {
+				g.selected = i
+				return
+			}
+		}
+	}
 	g.clampSelection()
 }
 
@@ -126,15 +152,43 @@ func (g *Grid) visibleCells() []GridCell {
 	return out
 }
 
-// SelectedName returns the name of the selected service, or "" if the grid is
-// empty. Callers resolve the name back to their own index — the grid doesn't
-// know about panes or service lists.
-func (g *Grid) SelectedName() string {
+// Selected returns the selected cell, and false if the grid is empty. Callers
+// resolve it back to their own state — the grid doesn't know about panes,
+// service lists or supervisors.
+func (g *Grid) Selected() (GridCell, bool) {
 	cells := g.visibleCells()
 	if g.selected < 0 || g.selected >= len(cells) {
+		return GridCell{}, false
+	}
+	return cells[g.selected], true
+}
+
+// SelectedName returns the display name of the selected service, or "".
+func (g *Grid) SelectedName() string {
+	c, ok := g.Selected()
+	if !ok {
 		return ""
 	}
-	return cells[g.selected].Name
+	return c.Name
+}
+
+// SelectedKey returns the identity of the selected cell, or "".
+func (g *Grid) SelectedKey() string {
+	c, ok := g.Selected()
+	if !ok {
+		return ""
+	}
+	return c.key()
+}
+
+// SelectKey moves the selection to a cell by identity, if it's visible.
+func (g *Grid) SelectKey(key string) {
+	for i, c := range g.visibleCells() {
+		if c.key() == key {
+			g.selected = i
+			return
+		}
+	}
 }
 
 // SelectName moves the selection to a named service if it's visible.

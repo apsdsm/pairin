@@ -50,6 +50,7 @@ pairin
 
 | Command                     | Action                                                                       |
 |-----------------------------|------------------------------------------------------------------------------|
+| `pairin dash`               | Dashboard of every project on this host                                      |
 | `pairin` (or `pairin up`)   | Start the supervisor for this project (or attach if one is already running)  |
 | `pairin -d` (or `pairin up -d`) | Start the supervisor in the background and exit without attaching a TUI |
 | `pairin up <project>`       | Start a **registered** project by name, from anywhere                        |
@@ -67,6 +68,53 @@ If a previous supervisor exited without cleaning up, `pairin up` detects the orp
 `-d` / `--detach` is idempotent: if a supervisor is already running for this project, it prints the existing PID and exits without doing anything.
 
 `--clear-logs` (on `pairin` / `pairin up`) deletes the existing service logs in `.pairin/logs/` before starting, so the TUI opens with fresh panes instead of preloading history from previous sessions. It refuses to run while a supervisor is already up — stop it with `pairin down` first.
+
+## The Dashboard
+
+`pairin dash` shows every project on the host at once — no tmux required:
+
+```
+pairin  5 projects (4 up) · 19 services · 15 running
+
+Acme API  ~/Code/acme-api  sup 2861956  1m
+ ● postgres             ● redis                ● api
+
+Analytics  ~/Code/analytics  stopped — press s to start
+›○ ingest               ○ rollup
+
+JJC2 (localdev)  ~/Code/jjc2_main  sup 2847550  7m
+ ● db                   ● system_api           ● user_web             ● employee_web
+ ● sysadmin_web         ● process_runner       ● docs
+
+LGC (localdev)  ~/Code/lgc_main  sup 2863604  35s
+ ◍ db                   ⋯ api                  ● web                  ● cp
+
+● up  ◍ unhealthy  ◐ starting  ⋯ waiting  ⟳ restarting  ✕ crashed  ○ stopped
+↑↓←→ move  z logs  r restart  x stop  s start  S shut down project  / filter  q quit
+```
+
+Registered projects that aren't running appear greyed out with their service names read from their
+config, so you can see a project's shape before starting it — `s` starts it in place.
+
+`z` on any service opens its logs full-screen. Only that one service streams its output while you're
+looking at it; the rest of the host's logs stay off the wire.
+
+`q` closes the dashboard and touches nothing. Stopping is always explicit: `x` for a service, `S` for
+a whole project.
+
+The dashboard re-reads the catalog and the registry every couple of seconds, so projects you start in
+another terminal appear on their own, and supervisors that go away are dropped.
+
+| Key            | Action                                                     |
+|----------------|------------------------------------------------------------|
+| `←↑↓→` / `hjkl`| Move the selection (scroll, when zoomed)                   |
+| `z` / `enter`  | Open the selected service's logs, and back                 |
+| `r`            | Restart the selected service                               |
+| `x`            | Stop the selected service                                  |
+| `s`            | Start the selected service, or the whole project if it's down |
+| `S`            | Shut down the selected project                             |
+| `/`            | Filter services by name, across every project              |
+| `q` / `ctrl+c` | Close the dashboard (everything keeps running)             |
 
 ## The Project Catalog
 

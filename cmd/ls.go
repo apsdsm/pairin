@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/apsdsm/pairin/internal/state"
+	"github.com/apsdsm/pairin/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -98,26 +99,8 @@ func projectLabel(inst state.Instance) string {
 	return inst.ConfigPath
 }
 
+
 // formatUptime renders a duration as a short human string (e.g. "2h13m", "5d").
-func formatUptime(d time.Duration) string {
-	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	}
-	if d < time.Hour {
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	}
-	if d < 24*time.Hour {
-		h := int(d.Hours())
-		m := int(d.Minutes()) % 60
-		if m == 0 {
-			return fmt.Sprintf("%dh", h)
-		}
-		return fmt.Sprintf("%dh%dm", h, m)
-	}
-	days := int(d.Hours()) / 24
-	h := int(d.Hours()) % 24
-	if h == 0 {
-		return fmt.Sprintf("%dd", days)
-	}
-	return fmt.Sprintf("%dd%dh", days, h)
-}
+// Shared with the dashboard, which needs the same abbreviation in its project
+// headers.
+func formatUptime(d time.Duration) string { return tui.FormatUptime(d) }

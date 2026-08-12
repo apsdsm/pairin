@@ -25,10 +25,13 @@ cmd/
   ls.go                        # `pairin ls`: list supervisors across the host
   projects.go                  # `pairin register` / `unregister` / `projects`: the project catalog
   status.go                    # `pairin status`: per-service status across every supervisor
+  dash.go                      # `pairin dash`: host-wide dashboard over a hub
   supervisor.go                # Hidden `pairin supervisor`: the detached background worker
   version.go                   # Version constant + `pairin version`
 internal/
   catalog/catalog.go           # User's registered projects: $XDG_CONFIG_HOME/pairin/projects.toml
+  hub/hub.go                   # Connections to every supervisor on the host; tagged events, per-instance reconnect
+  launcher/launcher.go         # Spawning detached supervisors; shared by the CLI and the dashboard
   config/config.go             # TOML config loading, dir resolution, dependency/cycle validation
   crash/crash.go               # Panic capture: Guard for goroutines, reports under $XDG_STATE_HOME/pairin/
   process/manager.go           # Process lifecycle, log capture, healthcheck polling, auto-restart, adoption
@@ -42,7 +45,8 @@ internal/
     logfile.go                 # Per-service log paths and 10 MiB rotation threshold
   tui/
     model.go                   # Bubble Tea model: keys, layout, split/grid/focus views; talks to a Backend interface
-    grid.go                    # Compact status grid (groups of cells), shared with the planned fleet dashboard
+    grid.go                    # Compact status grid (groups of cells), shared by the project and fleet models
+    fleet.go                   # `pairin dash` model: every project on the host, over a hub
     pane.go                    # Single service pane: viewport, title bar, log rendering
     tail.go                    # Preload last N lines from on-disk log files when attaching
     styles.go                  # Lipgloss styles and color mapping

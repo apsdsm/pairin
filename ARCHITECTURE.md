@@ -22,6 +22,11 @@ internal/
   catalog/
     catalog.go                    Registered projects: load/save, name derivation, prefix lookup
     catalog_test.go               Slugs, unique names, idempotent Add, ambiguous lookup
+  hub/
+    hub.go                        Connections to every supervisor on the host; tagged events
+    hub_test.go                   Multi-supervisor connect, stopped-project stubs, disconnect
+  launcher/
+    launcher.go                   Spawning detached supervisors, shared by the CLI and the dashboard
   crash/
     crash.go                      Panic capture: Guard for goroutines, Report writes to the state dir
     crash_test.go                 Guard recovers, report lands under XDG_STATE_HOME
@@ -39,9 +44,11 @@ internal/
     logfile.go                    Per-service log paths and 10 MiB rotation threshold
   tui/
     model.go                      Bubble Tea model: keys, layout, split/grid/focus views; uses Backend interface
-    grid.go                       Compact status grid, grouped and filterable; shared with the fleet dashboard
+    grid.go                       Compact status grid, grouped and filterable; shared by both models
+    fleet.go                      Host-wide dashboard model over a hub
     grid_test.go                  Column geometry, navigation, filtering, windowing
     model_test.go                 View auto-degrade, zoom, filter input, render fits the terminal
+    fleet_test.go                 Multi-project rendering, cross-project selection, zoom log routing
     pane.go                       Single service pane: viewport, title bar, log rendering
     tail.go                       Preload last N lines from on-disk log files when attaching
     styles.go                     Lipgloss styles, color map
@@ -140,6 +147,47 @@ A new client always receives an `EvtSnapshot` first, then a stream of incrementa
 - The first snapshot allocates `*process.Service` mirrors via `process.NewMirrorService` and builds a `nameToIdx` map. Subsequent snapshots **update fields in place** rather than rebuilding the slice, so pointers held by the TUI survive a supervisor restart.
 - Each incoming event mutates the mirror service **through `Service`'s locked mutators** (`ApplyStatus`, `ApplyHealth`, `AppendLog`, `UpdateMirror`) and forwards a translated `tea.Msg` (`StatusMsg`, `LogMsg`, `HealthCheckMsg`) to the TUI's `tea.Program` (installed via `SetProgram` / `SetSink`). The model's `Update` function is identical to the local-manager case.
 - `StopAll()` is a deliberate no-op in client mode (`q` is detach, not stop). `Shutdown()` is the explicit "kill everything" path used by the `d` key and `pairin down`.
+
+## The Fleet Dashboard
+
+`pairin dash` runs `tui.FleetModel` over an `internal/hub.Hub`. The hub is a *client* — nothing about
+the supervisor's ownership model changes, there is still exactly one supervisor per project.
+
+```
+catalog (registered)  +  registry (running)
+            |
+       Hub.Refresh()  -- reconciles the instance SET only, never blocks
+            |
+   one supervise() goroutine per project
+     dial -> hold -> redial with backoff
+            |
+     control.Client per live supervisor
+            |
+   instanceSink tags each event with its InstanceID
+            |
+      hub.Msg{ID, Inner} -> FleetModel.Update
+            |
+      FleetModel renders from Hub.Snapshot() values
+```
+
+Design points that matter:
+
+- **Refresh never blocks.** `control.Dial` waits up to five seconds for a snapshot; a dozen projects
+  dialed in sequence would be a minute of dead air before the first frame. Refresh only adds and
+  removes instances, and each one's supervise goroutine does the dialing.
+- **Rendering is from value snapshots.** `Hub.Snapshot()` returns `[]InstanceView` holding
+  `[]process.ServiceView`. Service views are read *after* releasing the hub lock, because
+  `Service.View` takes its own and holding two is how deadlocks start.
+- **Cells are keyed, not named.** Two projects each having a service called `web` is normal, so
+  `GridCell.Key` carries `instanceID + NUL + service` and selection is tracked by that. Within a
+  single project `Key` is left empty and `Name` serves.
+- **Logs are subscribed, not firehosed.** The hub connects with `LogsNone`. Zooming narrows that one
+  instance to `LogsOnly` for the one service; leaving zoom restores `LogsNone`. The zoomed pane fills
+  its backlog from the on-disk log file, so it isn't empty on arrival.
+- **Quitting is not stopping.** `q` closes the dashboard and touches no supervisor. Stopping is
+  always an explicit key: `x` for a service, `S` for a project.
+- **Starting goes through `internal/launcher`**, the same path the CLI uses. Orphan adoption is
+  automatic there — the CLI can prompt, a dashboard can't, and adopting doesn't destroy work.
 
 ## Catalog vs. Registry
 
