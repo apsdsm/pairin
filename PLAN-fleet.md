@@ -187,7 +187,7 @@ Unrelated find, not fixed: a project nested deeply enough that `.pairin/control.
 ~107-byte unix socket path limit fails with a bare `bind: invalid argument`. Worth a friendlier
 error, but it isn't a stability bug.
 
-### Phase 1 — Compact view *(fixes pain 2)*
+### Phase 1 — Compact view *(fixes pain 2)* — **shipped on `fleet-stability`**
 
 New `internal/tui/grid.go`, a pure component: given width, a list of groups, and a selection, render a
 wrapping grid of status cells. Layout is a pure function, so it's unit-testable without a terminal.
@@ -213,6 +213,19 @@ wrapping grid of status cells. Layout is a pure function, so it's unit-testable 
 - `/` filters by name substring.
 
 **Done when:** a 20-service config opens in a readable grid and `z` gets you a full-screen log tail.
+
+**Outcome.** Landed as `tui/grid.go` plus a third view mode. Verified against a real 20-service
+supervisor: it auto-degrades to the grid with no user action, and a 2-service project still opens in
+split view.
+
+One design constraint worth carrying into phase 4: **Bubble Tea hands `View()` a copy of the model**,
+so anything a render computes and stores is discarded before the next keystroke. The grid therefore
+keeps only `groups`/`filter`/size/`selected` and derives column count and scroll offset on every
+render; cell data is rebuilt in `Update` via `refreshGrid()`. The fleet model will need the same
+discipline, with more state to get it wrong with.
+
+Grid selection is tracked by **name**, not index, so it survives filtering and services appearing or
+disappearing — worth keeping when groups start coming and going as projects start and stop.
 
 ### Phase 2 — Project catalog *(fixes "hunting for config files")*
 

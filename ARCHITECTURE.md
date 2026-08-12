@@ -35,7 +35,10 @@ internal/
     registry.go                   Host-wide instance registry under $XDG_STATE_HOME/pairin/instances/
     logfile.go                    Per-service log paths and 10 MiB rotation threshold
   tui/
-    model.go                      Bubble Tea model: keys, layout, split/focus views; uses Backend interface
+    model.go                      Bubble Tea model: keys, layout, split/grid/focus views; uses Backend interface
+    grid.go                       Compact status grid, grouped and filterable; shared with the fleet dashboard
+    grid_test.go                  Column geometry, navigation, filtering, windowing
+    model_test.go                 View auto-degrade, zoom, filter input, render fits the terminal
     pane.go                       Single service pane: viewport, title bar, log rendering
     tail.go                       Preload last N lines from on-disk log files when attaching
     styles.go                     Lipgloss styles, color map
@@ -402,18 +405,55 @@ Then:
 +---------------------------------------------------------------+
 ```
 
-**Split view** (default): All panes stacked vertically, height divided evenly.
+**Split view**: All panes stacked vertically, height divided evenly.
+**Grid view**: A compact status cell per service — see below.
 **Focus view** (press 1-9, or `z` to toggle): Single pane fills the screen, scrollable with j/k/arrows.
+
+The initial view is **chosen, not fixed**: if `availableHeight / len(panes)` is below
+`minSplitPaneHeight` (6), the model opens in grid view, because twenty two-line viewports show
+nothing. Pressing `v` sets `viewChosen`, after which resizes leave the choice alone.
+
+```
++---------------------------------------------------------------+
+| bigproject   20 services · 18 up            filter: api        |  <- header + tally
++---------------------------------------------------------------+
+|  ● postgres     ● redis       ● api         ◍ worker           |
+| ›● migrations   ○ mailhog     ✕ scheduler   ⟳ indexer 3/5      |  <- › marks selection
+|  ⋯ reporter     ● gateway                                      |
+|                                                                |
+| ● up  ◍ unhealthy  ◐ starting  ⋯ waiting  ⟳ restarting  ...    |  <- legend
++---------------------------------------------------------------+
+| ↑↓←→ move  z zoom  r restart  / filter  v split  q detach      |
++---------------------------------------------------------------+
+```
+
+### Grid (`tui.Grid`)
+
+The grid is shared with the fleet dashboard, which is why it takes *groups* of cells rather than a
+flat list — one group per project there, exactly one here.
+
+Its only stored state is `groups`, `filter`, `width`, `height` and a flat `selected` index.
+**Everything else is derived on each render.** Bubble Tea passes `View()` a *copy* of the model, so
+a column count or scroll offset computed during a render would be discarded before the next
+keystroke; `Move` recomputes the column count from `gridColumns`, and `window` derives the scroll
+offset from the selection alone. `DashboardModel.Update` calls `refreshGrid()` (not `View`) to
+rebuild cells from live service state, for the same reason.
+
+Selection is tracked by **name**, not index, so it survives filtering — `syncGridSelection` and
+`syncActiveFromGrid` keep `m.active` and the grid pointing at the same service in both directions.
 
 ### Keys
 
 | Key            | Action                                                   |
 |----------------|----------------------------------------------------------|
 | `1`-`9`        | Focus pane N                                             |
-| `z`            | Toggle zoom (split ↔ focus on the active pane)           |
-| `tab` / `S-tab`| Cycle active pane forward / backward                     |
-| `r`            | Restart the active service                               |
-| `↑`/`k`, `↓`/`j` | Scroll the active pane                                 |
+| `v`            | Switch between split and grid                            |
+| `z` / `enter`  | Toggle zoom (split or grid ↔ focus on the selection)     |
+| `esc`          | Leave focus view, or clear the grid filter               |
+| `tab` / `S-tab`| Cycle selection forward / backward                       |
+| `←↑↓→`/`hjkl`  | Move the selection (grid) or scroll (split / focus)      |
+| `/`            | Filter by name (grid only); swallows keys while typing   |
+| `r`            | Restart the selected service                             |
 | `q` / `ctrl+c` | Detach the TUI; supervisor + services keep running       |
 | `d`            | Shut down: stop every service and exit the supervisor    |
 

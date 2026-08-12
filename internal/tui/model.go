@@ -16,8 +16,14 @@ type viewState int
 
 const (
 	viewSplit viewState = iota
+	viewGrid
 	viewFocus
 )
+
+// minSplitPaneHeight is the shortest a log pane can get before stacking them
+// stops being useful. Past that the split view is auto-degraded to the grid —
+// twenty two-line viewports show nothing at all.
+const minSplitPaneHeight = 6
 
 // Backend is everything the TUI needs from whatever's actually running
 // services — either a local process.Manager or a control.Client attached to
@@ -57,17 +63,27 @@ const (
 )
 
 type DashboardModel struct {
-	cfg       *config.Config
-	mgr       Backend
-	conn      Connection // nil when the backend is local
-	panes     []Pane
-	width     int
-	height    int
-	view      viewState
-	active    int // active pane index in split view
-	focused   int // focused pane index in focus view
-	quitting  bool
+	cfg          *config.Config
+	mgr          Backend
+	conn         Connection // nil when the backend is local
+	panes        []Pane
+	grid         Grid
+	width        int
+	height       int
+	view         viewState
+	prevView     viewState // what to return to when leaving focus
+	active       int       // selected service; shared by split, grid and focus
+	focused      int       // focused pane index in focus view
+	quitting     bool
 	shuttingDown bool // true when quitting via 'D' rather than 'q'
+
+	// viewChosen records that the user picked a view with 'v'. Until they do,
+	// the model picks between split and grid based on how much room there is.
+	viewChosen bool
+
+	// filtering is true while '/' input is being typed.
+	filtering   bool
+	filterInput string
 
 	// Connection state. The TUI stays up and keeps rendering the last known
 	// service states while disconnected — the supervisor going away must not
@@ -94,7 +110,9 @@ func NewDashboardModel(cfg *config.Config, mgr Backend) DashboardModel {
 		cfg:        cfg,
 		mgr:        mgr,
 		panes:      panes,
+		grid:       NewGrid(),
 		view:       viewSplit,
+		prevView:   viewSplit,
 		retryDelay: reconnectMinDelay,
 	}
 	if conn, ok := mgr.(Connection); ok {
@@ -149,10 +167,17 @@ func guarded(context string, cmd tea.Cmd) tea.Cmd {
 }
 
 func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Grid cells are rebuilt here rather than at render time: View receives a
+	// copy of the model, so anything it computed would be discarded.
+	if m.view == viewGrid {
+		m.refreshGrid()
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.autoSelectView()
 		m.recalcPaneSizes()
 		return m, nil
 
@@ -228,6 +253,12 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m DashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
+	// Filter entry swallows every key, so a service named "quiet" can be typed
+	// without 'q' detaching halfway through.
+	if m.filtering {
+		return m.handleFilterKey(msg)
+	}
+
 	switch key {
 	case "q", "ctrl+c":
 		// Detach: tear down the TUI, leave the supervisor (and services)
@@ -254,26 +285,62 @@ func (m DashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		})
 
 	case "tab":
-		if m.view == viewSplit && len(m.panes) > 0 {
+		if m.view != viewFocus && len(m.panes) > 0 {
 			m.active = (m.active + 1) % len(m.panes)
+			m.syncGridSelection()
 		}
 		return m, nil
 
 	case "shift+tab":
-		if m.view == viewSplit && len(m.panes) > 0 {
+		if m.view != viewFocus && len(m.panes) > 0 {
 			m.active = (m.active - 1 + len(m.panes)) % len(m.panes)
+			m.syncGridSelection()
 		}
 		return m, nil
 
-	case "z":
-		// Zoom toggle: split <-> focus on the active pane.
+	case "z", "enter":
+		// Zoom toggle: whatever view we were in <-> focus on the active service.
 		if m.view == viewFocus {
-			m.view = viewSplit
+			m.view = m.prevView
 		} else {
+			m.prevView = m.view
 			m.view = viewFocus
 			m.focused = m.active
 		}
 		m.recalcPaneSizes()
+		return m, nil
+
+	case "esc":
+		if m.view == viewFocus {
+			m.view = m.prevView
+			m.recalcPaneSizes()
+		} else if m.grid.Filter() != "" {
+			m.grid.SetFilter("")
+			m.syncActiveFromGrid()
+		}
+		return m, nil
+
+	case "v":
+		// Explicit view choice; stops the model second-guessing it on resize.
+		m.viewChosen = true
+		switch m.view {
+		case viewGrid:
+			m.view = viewSplit
+		case viewSplit:
+			m.view = viewGrid
+			m.refreshGrid()
+			m.syncGridSelection()
+		case viewFocus:
+			m.view = m.prevView
+		}
+		m.recalcPaneSizes()
+		return m, nil
+
+	case "/":
+		if m.view == viewGrid {
+			m.filtering = true
+			m.filterInput = m.grid.Filter()
+		}
 		return m, nil
 
 	case "r":
@@ -288,14 +355,38 @@ func (m DashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, guarded("restart", m.mgr.RestartService(idx))
 
 	case "up", "k":
+		if m.view == viewGrid {
+			m.grid.Move(0, -1)
+			m.syncActiveFromGrid()
+			return m, nil
+		}
 		if idx := m.activeIndex(); idx >= 0 && idx < len(m.panes) {
 			m.panes[idx].ScrollUp(3)
 		}
 		return m, nil
 
 	case "down", "j":
+		if m.view == viewGrid {
+			m.grid.Move(0, 1)
+			m.syncActiveFromGrid()
+			return m, nil
+		}
 		if idx := m.activeIndex(); idx >= 0 && idx < len(m.panes) {
 			m.panes[idx].ScrollDown(3)
+		}
+		return m, nil
+
+	case "left", "h":
+		if m.view == viewGrid {
+			m.grid.Move(-1, 0)
+			m.syncActiveFromGrid()
+		}
+		return m, nil
+
+	case "right", "l":
+		if m.view == viewGrid {
+			m.grid.Move(1, 0)
+			m.syncActiveFromGrid()
 		}
 		return m, nil
 
@@ -315,11 +406,86 @@ func (m DashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleFilterKey runs while '/' input is active.
+func (m DashboardModel) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.filtering = false
+		m.filterInput = ""
+		m.grid.SetFilter("")
+		m.syncActiveFromGrid()
+	case "enter":
+		m.filtering = false
+	case "backspace":
+		if n := len(m.filterInput); n > 0 {
+			m.filterInput = m.filterInput[:n-1]
+			m.grid.SetFilter(m.filterInput)
+			m.syncActiveFromGrid()
+		}
+	default:
+		if len(msg.Runes) > 0 {
+			m.filterInput += string(msg.Runes)
+			m.grid.SetFilter(m.filterInput)
+			m.syncActiveFromGrid()
+		}
+	}
+	return m, nil
+}
+
 func (m *DashboardModel) activeIndex() int {
 	if m.view == viewFocus {
 		return m.focused
 	}
 	return m.active
+}
+
+// refreshGrid rebuilds the grid's cells from current service state. The project
+// TUI is a single group; the fleet dashboard will supply one per project.
+func (m *DashboardModel) refreshGrid() {
+	m.grid.SetGroups([]GridGroup{{Cells: GridCellsFor(m.mgr.ServiceList())}})
+}
+
+// syncGridSelection points the grid at whatever service is currently active.
+func (m *DashboardModel) syncGridSelection() {
+	svcs := m.mgr.ServiceList()
+	if m.active >= 0 && m.active < len(svcs) {
+		m.grid.SelectName(svcs[m.active].View().Name)
+	}
+}
+
+// syncActiveFromGrid is the inverse: the grid moved, so bring the shared
+// selection with it. Going through names rather than indices keeps the two in
+// step even when a filter is hiding part of the list.
+func (m *DashboardModel) syncActiveFromGrid() {
+	name := m.grid.SelectedName()
+	if name == "" {
+		return
+	}
+	for i, svc := range m.mgr.ServiceList() {
+		if svc.View().Name == name {
+			m.active = i
+			return
+		}
+	}
+}
+
+// autoSelectView picks between split and grid based on available height, unless
+// the user has made the choice themselves with 'v'.
+func (m *DashboardModel) autoSelectView() {
+	if m.viewChosen || m.view == viewFocus || len(m.panes) == 0 || m.height == 0 {
+		return
+	}
+	available := m.height - 2 // header + footer
+	if available/len(m.panes) < minSplitPaneHeight {
+		if m.view != viewGrid {
+			m.view = viewGrid
+			m.refreshGrid()
+			m.syncGridSelection()
+		}
+	} else {
+		m.view = viewSplit
+	}
+	m.prevView = m.view
 }
 
 func (m *DashboardModel) recalcPaneSizes() {
@@ -331,6 +497,12 @@ func (m *DashboardModel) recalcPaneSizes() {
 	headerHeight := 1
 	footerHeight := 1
 	availableHeight := m.height - headerHeight - footerHeight
+
+	if m.view == viewGrid {
+		// Reserve a blank line and the glyph legend beneath the grid.
+		m.grid.SetSize(m.width, availableHeight-2)
+		return
+	}
 
 	if m.view == viewFocus {
 		if m.focused >= 0 && m.focused < len(m.panes) {
@@ -371,9 +543,19 @@ func (m DashboardModel) View() string {
 	b.WriteString("\n")
 
 	// Main content
-	if m.view == viewFocus && m.focused >= 0 && m.focused < len(m.panes) {
+	switch {
+	case m.view == viewGrid:
+		grid := m.grid.View()
+		body := grid + "\n\n" + GridLegend()
+		// Pad to the full height so the footer stays put instead of walking up
+		// and down the screen as services start, stop, or get filtered out.
+		if pad := (m.height - 2) - (strings.Count(body, "\n") + 1); pad > 0 {
+			body += strings.Repeat("\n", pad)
+		}
+		b.WriteString(body)
+	case m.view == viewFocus && m.focused >= 0 && m.focused < len(m.panes):
 		b.WriteString(m.panes[m.focused].RenderFocus())
-	} else {
+	default:
 		for i := range m.panes {
 			b.WriteString(m.panes[i].RenderSplit(i == m.active))
 			if i < len(m.panes)-1 {
@@ -390,9 +572,21 @@ func (m DashboardModel) View() string {
 }
 
 func (m DashboardModel) renderHeader() string {
-	// Each pane's title bar carries its own status/name/health/PID, so the
-	// header just shows the project name.
-	return HeaderStyle.Render(m.cfg.Project.Name)
+	// Each pane's title bar carries its own status/name/health/PID, so in the
+	// pane views the header just shows the project name. The grid has no title
+	// bars, so it gets the tally instead.
+	name := HeaderStyle.Render(m.cfg.Project.Name)
+	if m.view != viewGrid {
+		return name
+	}
+
+	cells := GridCellsFor(m.mgr.ServiceList())
+	up, total := SummarizeCells(cells)
+	summary := DimStyle.Render(fmt.Sprintf("%d services · %d up", total, up))
+	if f := m.grid.Filter(); f != "" {
+		summary += "  " + StatusStarting.Render(fmt.Sprintf("filter: %s", f))
+	}
+	return name + "  " + summary
 }
 
 func (m DashboardModel) renderFooter() string {
@@ -410,5 +604,16 @@ func (m DashboardModel) renderFooter() string {
 		}
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true).Render("⚠ " + msg)
 	}
-	return FooterStyle.Render("tab cycle  r restart  z zoom  q detach  d down")
+	if m.filtering {
+		return HeaderStyle.Render("/"+m.filterInput) + FooterStyle.Render("  enter accept  esc clear")
+	}
+
+	switch m.view {
+	case viewGrid:
+		return FooterStyle.Render("↑↓←→ move  z zoom  r restart  / filter  v split  q detach  d down")
+	case viewFocus:
+		return FooterStyle.Render("↑↓ scroll  r restart  z back  q detach  d down")
+	default:
+		return FooterStyle.Render("tab cycle  r restart  z zoom  v grid  q detach  d down")
+	}
 }

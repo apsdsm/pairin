@@ -39,7 +39,8 @@ internal/
     registry.go                # Host-wide registry under $XDG_STATE_HOME/pairin/instances/
     logfile.go                 # Per-service log paths and 10 MiB rotation threshold
   tui/
-    model.go                   # Bubble Tea model: keys, layout, split/focus views; talks to a Backend interface
+    model.go                   # Bubble Tea model: keys, layout, split/grid/focus views; talks to a Backend interface
+    grid.go                    # Compact status grid (groups of cells), shared with the planned fleet dashboard
     pane.go                    # Single service pane: viewport, title bar, log rendering
     tail.go                    # Preload last N lines from on-disk log files when attaching
     styles.go                  # Lipgloss styles and color mapping
@@ -130,6 +131,7 @@ max_restarts = 5
 ## Key Design Decisions
 
 - **`svc.mu` is never held across `m.send()`** — the sink may be a socket, and a client that stops reading would otherwise pin the mutex and stall the tailer, healthchecks and the stop path. `startServiceLocked` returns `[]tea.Msg` for the caller to publish after unlocking; do the same for any new send inside a locked region.
+- **Nothing computed in `View()` may be stored** — Bubble Tea renders from a copy of the model, so grid layout, column counts and scroll offsets are derived on each render; cell data is rebuilt in `Update` via `refreshGrid()`
 - **Render from `Service.View()`, never from live `Service` fields** — those are mutated concurrently by the manager's goroutines and the control client's read loop.
 - Each control-socket client has its own send queue and writer goroutine; `broadcast` only enqueues. On overflow, events are dropped and the client is resynced with a fresh snapshot.
 - Panics are captured (`internal/crash`) rather than allowed to vanish: the TUI runs with `tea.WithoutCatchPanics()` because Bubble Tea's own handler exits zero with no record

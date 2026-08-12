@@ -136,19 +136,47 @@ max_restarts = 5
 - The title bar shows restart count (e.g. `restarting 3/5` or `restarting #3`)
 - Manual restart (`r` key) resets the restart counter
 
+## Views
+
+pairin has three views:
+
+- **split** — every service gets a log pane, stacked. The default for a handful of services.
+- **grid** — a compact status grid, one cell per service. Built for configs too big to give
+  everything a readable pane.
+- **focus** — one service's logs, full screen.
+
+`v` switches between split and grid; `z` (or `enter`) zooms the selected service to full screen and
+back. If there are so many services that each pane would be under 6 lines tall, pairin **starts in
+grid view on its own** — twenty two-line viewports show nothing useful. Pressing `v` takes the choice
+back, and pairin stops second-guessing it on resize.
+
+In grid view each cell carries a status glyph: `●` up, `◍` running but failing its healthcheck,
+`◐` starting, `⋯` waiting on a dependency, `⟳` restarting, `✕` crashed, `○` stopped.
+
 ## Keyboard Shortcuts
 
-| Key          | Action                                                       |
-|--------------|--------------------------------------------------------------|
-| `1`-`9`      | Focus a service pane full-screen                             |
-| `z`          | Toggle zoom (split view ↔ focus on the active pane)          |
-| `tab`        | Cycle active pane forward                                    |
-| `shift+tab`  | Cycle active pane backward                                   |
-| `r`          | Restart the active service                                   |
-| `up` / `k`   | Scroll up                                                    |
-| `down` / `j` | Scroll down                                                  |
+| Key            | Action                                                     |
+|----------------|------------------------------------------------------------|
+| `1`-`9`        | Focus a service pane full-screen                           |
+| `v`            | Switch between split and grid view                         |
+| `z` / `enter`  | Zoom the selected service full-screen, and back            |
+| `esc`          | Leave focus view, or clear the grid filter                 |
+| `tab`          | Cycle selection forward                                    |
+| `shift+tab`    | Cycle selection backward                                   |
+| `←↑↓→` / `hjkl`| Move the selection (grid) or scroll logs (split / focus)   |
+| `/`            | Filter services by name (grid view)                        |
+| `r`            | Restart the selected service                               |
 | `q` / `ctrl+c` | Detach the TUI (services and supervisor keep running)      |
-| `d`          | Shut down: stop every service and exit the supervisor        |
+| `d`            | Shut down: stop every service and exit the supervisor      |
+
+## When Something Goes Wrong
+
+If pairin itself crashes, it writes a report to `$XDG_STATE_HOME/pairin/crash-<timestamp>-<pid>.log`
+(default `~/.local/state/pairin/`) naming the goroutine and the stack. A TUI crash leaves your
+services running — reattach with `pairin attach`.
+
+If the supervisor goes away while a TUI is attached, the TUI stays up, shows a reconnect banner, and
+reattaches by itself once the supervisor is back.
 
 ## How It Works
 
