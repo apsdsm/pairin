@@ -343,6 +343,13 @@ func (m DashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case "b":
+		if m.view == viewGrid {
+			m.grid.CycleCellStyle()
+			m.recalcPaneSizes()
+		}
+		return m, nil
+
 	case "r":
 		idx := m.activeIndex()
 		svcs := m.mgr.ServiceList()
@@ -610,7 +617,7 @@ func (m DashboardModel) renderFooter() string {
 
 	switch m.view {
 	case viewGrid:
-		return FooterStyle.Render("↑↓←→ move  z zoom  r restart  / filter  v split  q detach  d down")
+		return FooterStyle.Render("↑↓←→ move  z zoom  r restart  b cells  / filter  v split  q detach  d down")
 	case viewFocus:
 		return FooterStyle.Render("↑↓ scroll  r restart  z back  q detach  d down")
 	default:

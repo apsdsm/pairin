@@ -326,3 +326,28 @@ func TestFleetViewFitsTerminal(t *testing.T) {
 		t.Logf("\n%s", m.View())
 	}
 }
+
+// TestFleetCellStyles renders each cell style so they can be compared, and
+// checks all three stay inside the terminal they were given.
+func TestFleetCellStyles(t *testing.T) {
+	const width, height = 100, 40
+	m, _ := newFleet(t, width, height, func(root string) {
+		fleetProject(t, root, "acme-api", "postgres", "redis", "api", "worker")
+		fleetProject(t, root, "storefront", "web", "bff")
+	})
+
+	for _, style := range []CellStyle{CellPlain, CellBoxed, CellCard} {
+		m.grid.SetCellStyle(style)
+		m.resize()
+		view := m.View()
+
+		for i, line := range strings.Split(view, "\n") {
+			if w := lipglossWidth(line); w > width {
+				t.Errorf("%s: line %d is %d wide, want at most %d", style, i, w, width)
+			}
+		}
+		if testing.Verbose() {
+			t.Logf("\n--- %s ---\n%s", style, view)
+		}
+	}
+}

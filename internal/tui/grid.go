@@ -22,6 +22,8 @@ type Grid struct {
 	width  int
 	height int
 
+	cellStyle CellStyle
+
 	// selected is a flat index across every visible cell. Groups come and go
 	// as projects start and stop, and flattening keeps navigation from having
 	// to care about that.
@@ -48,6 +50,8 @@ type GridCell struct {
 	HasHealth    bool
 	RestartCount int
 	MaxRestarts  int
+	PID          int
+	DependsOn    []string
 }
 
 // key is the cell's identity for selection purposes.
@@ -68,13 +72,83 @@ type GridGroup struct {
 	Cells []GridCell
 }
 
-// gridLayout is the computed geometry of one render pass.
+// CellStyle is how much room each service is given on screen.
+type CellStyle int
+
+const (
+	// CellPlain: one line per service, no border. Fits the most on screen.
+	CellPlain CellStyle = iota
+	// CellBoxed: a box per service, one line of content.
+	CellBoxed
+	// CellCard: a box per service with a second line carrying its state.
+	CellCard
+)
+
+func (s CellStyle) String() string {
+	switch s {
+	case CellBoxed:
+		return "boxed"
+	case CellCard:
+		return "cards"
+	default:
+		return "plain"
+	}
+}
+
+// Next cycles through the styles, densest first.
+func (s CellStyle) Next() CellStyle {
+	switch s {
+	case CellPlain:
+		return CellBoxed
+	case CellBoxed:
+		return CellCard
+	default:
+		return CellPlain
+	}
+}
+
+// lineKind tags what a laid-out line holds.
+type lineKind int
+
+const (
+	lineBlank lineKind = iota
+	lineTitle
+	lineNote
+	lineRow
+)
+
+// lineSpec is one laid-out line of the grid. A lineRow may render to several
+// screen lines when cells are boxed.
+type lineSpec struct {
+	kind  lineKind
+	group int
+	cells []int // flat cell indices, for lineRow
+}
+
+// gridLayout is the geometry of the grid: which cells sit in which visual row,
+// and where each row lands on screen.
+//
+// Rendering and navigation both read this, which is the point. They used to
+// compute geometry separately — rendering broke rows at every group boundary
+// while navigation did flat arithmetic over a uniform column count — so moving
+// down out of a short group skipped whole projects.
 type gridLayout struct {
 	cols     int
 	cellWide int
-	// rowOfCell maps a flat cell index to the line it was rendered on, so
-	// scrolling can keep the selection visible.
+
+	cells []GridCell // visible cells, flat, in render order
+	specs []lineSpec
+
+	// rows holds the flat cell indices of each visual row, in render order and
+	// including row breaks at group boundaries. Vertical movement walks this.
+	rows [][]int
+	// rowOfCell maps a flat cell index to its row in rows.
 	rowOfCell []int
+	// lineOfCell maps a flat cell index to the last screen line of its row, so
+	// scrolling to it brings the whole row (borders included) into view.
+	lineOfCell []int
+	// totalLines is how many screen lines the whole grid occupies.
+	totalLines int
 }
 
 const (
@@ -119,6 +193,15 @@ func (g *Grid) SetFilter(q string) {
 }
 
 func (g *Grid) Filter() string { return g.filter }
+
+// CellStyle reports how cells are currently drawn.
+func (g *Grid) CellStyle() CellStyle { return g.cellStyle }
+
+// SetCellStyle changes how much room each service gets.
+func (g *Grid) SetCellStyle(s CellStyle) { g.cellStyle = s }
+
+// CycleCellStyle steps to the next cell style.
+func (g *Grid) CycleCellStyle() { g.cellStyle = g.cellStyle.Next() }
 
 // visibleGroups applies the filter. Groups that lose all their cells are kept
 // only if they had a note to show in the first place — an empty project header
@@ -215,29 +298,160 @@ func (g *Grid) clampSelection() {
 	}
 }
 
-// Move shifts the selection by dx columns and dy rows. Movement is over the
-// flat cell order, so running off the end of one group lands in the next.
+// Move shifts the selection by dx columns and dy rows.
+//
+// Horizontal movement runs along the flat cell order, so walking off the end of
+// one project continues into the next. Vertical movement walks the *rendered*
+// rows, which is what makes crossing a group boundary land where the eye
+// expects: the row below the last row of a project is the first row of the next
+// one, however many cells that project happened to have.
 func (g *Grid) Move(dx, dy int) {
-	cells := g.visibleCells()
-	n := len(cells)
+	l := g.layout()
+	n := len(l.cells)
 	if n == 0 {
 		return
 	}
+	if g.selected >= n {
+		g.selected = n - 1
+	}
+	if g.selected < 0 {
+		g.selected = 0
+	}
 
-	names := make([]string, len(cells))
-	for i, c := range cells {
-		names[i] = c.Name
+	if dx != 0 {
+		next := g.selected + dx
+		if next < 0 {
+			next = 0
+		}
+		if next >= n {
+			next = n - 1
+		}
+		g.selected = next
 	}
-	cols, _ := gridColumns(g.width, names)
 
-	next := g.selected + dx + dy*cols
-	if next < 0 {
-		next = 0
+	if dy == 0 || len(l.rows) == 0 {
+		return
 	}
-	if next >= n {
-		next = n - 1
+
+	row := l.rowOfCell[g.selected]
+	col := 0
+	for i, idx := range l.rows[row] {
+		if idx == g.selected {
+			col = i
+			break
+		}
 	}
-	g.selected = next
+
+	step := 1
+	if dy < 0 {
+		step = -1
+	}
+	for i := 0; i < abs(dy); i++ {
+		next := row + step
+		if next < 0 || next >= len(l.rows) {
+			break
+		}
+		row = next
+	}
+
+	target := l.rows[row]
+	if col >= len(target) {
+		col = len(target) - 1
+	}
+	g.selected = target[col]
+}
+
+func abs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+// layout computes the grid's geometry. Pure: it depends only on the groups, the
+// filter and the size, so rendering and navigation always agree.
+func (g Grid) layout() gridLayout {
+	groups := g.visibleGroups()
+
+	var labels []string
+	for _, grp := range groups {
+		for _, c := range grp.Cells {
+			labels = append(labels, c.Name)
+			// A card's second line can be wider than the service's name
+			// ("pid 2994109" against "api"), so it has to be measured too or
+			// it gets truncated in cells that otherwise have room to spare.
+			if g.cellStyle == CellCard {
+				labels = append(labels, cellDetail(c))
+			}
+		}
+	}
+
+	cols, cellWide := gridColumns(g.width, labels)
+	if g.cellStyle != CellPlain {
+		// Borders and the gutter between boxes need columns of their own.
+		cellWide += 2
+		cols = g.width / cellWide
+		if cols < 1 {
+			cols = 1
+		}
+	}
+
+	l := gridLayout{cols: cols, cellWide: cellWide}
+	showTitles := len(groups) > 1 || (len(groups) == 1 && groups[0].Title != "")
+	line := 0
+	rowHeight := g.rowHeight()
+
+	for gi, grp := range groups {
+		if showTitles {
+			if gi > 0 {
+				l.specs = append(l.specs, lineSpec{kind: lineBlank, group: gi})
+				line++
+			}
+			l.specs = append(l.specs, lineSpec{kind: lineTitle, group: gi})
+			line++
+		}
+		if grp.Note != "" && len(grp.Cells) == 0 {
+			l.specs = append(l.specs, lineSpec{kind: lineNote, group: gi})
+			line++
+			continue
+		}
+
+		for start := 0; start < len(grp.Cells); start += cols {
+			end := start + cols
+			if end > len(grp.Cells) {
+				end = len(grp.Cells)
+			}
+			spec := lineSpec{kind: lineRow, group: gi}
+			var rowCells []int
+			for i := start; i < end; i++ {
+				flat := len(l.cells)
+				l.cells = append(l.cells, grp.Cells[i])
+				l.rowOfCell = append(l.rowOfCell, len(l.rows))
+				// Point at the row's last screen line, so scrolling to the
+				// selection brings the whole block into view.
+				l.lineOfCell = append(l.lineOfCell, line+rowHeight-1)
+				spec.cells = append(spec.cells, flat)
+				rowCells = append(rowCells, flat)
+			}
+			l.specs = append(l.specs, spec)
+			l.rows = append(l.rows, rowCells)
+			line += rowHeight
+		}
+	}
+	l.totalLines = line
+	return l
+}
+
+// rowHeight is how many screen lines one row of cells occupies.
+func (g Grid) rowHeight() int {
+	switch g.cellStyle {
+	case CellBoxed:
+		return 3 // top border, content, bottom border
+	case CellCard:
+		return 4 // top border, name, detail, bottom border
+	default:
+		return 1
+	}
 }
 
 // gridColumns computes how many cells fit across the given width, and how wide
@@ -348,6 +562,115 @@ func renderCell(c GridCell, selected bool, cellWide int) string {
 	return out
 }
 
+// cellLabel is the glyph plus name, with the restart counter folded in.
+func cellLabel(c GridCell, avail int) string {
+	glyph, glyphStyle := statusGlyph(c)
+
+	label := c.Name
+	if c.Status == process.StatusRestarting && c.RestartCount > 0 {
+		if c.MaxRestarts > 0 {
+			label = fmt.Sprintf("%s %d/%d", label, c.RestartCount, c.MaxRestarts)
+		} else {
+			label = fmt.Sprintf("%s #%d", label, c.RestartCount)
+		}
+	}
+	if avail > 0 && lipgloss.Width(label) > avail {
+		label = truncate(label, avail)
+	}
+
+	nameStyle := lipgloss.NewStyle().Foreground(ServiceColor(c.Color))
+	if c.Status == process.StatusStopped {
+		nameStyle = nameStyle.Faint(true)
+	}
+	return glyphStyle.Render(glyph) + " " + nameStyle.Render(label)
+}
+
+// cellDetail is the second line of a card: what the glyph can't say on its own.
+func cellDetail(c GridCell) string {
+	switch c.Status {
+	case process.StatusRunning:
+		if c.HasHealth && !c.Healthy {
+			return "unhealthy"
+		}
+		if c.PID > 0 {
+			return fmt.Sprintf("pid %d", c.PID)
+		}
+		return "running"
+	case process.StatusRestarting:
+		if c.MaxRestarts > 0 {
+			return fmt.Sprintf("retry %d/%d", c.RestartCount, c.MaxRestarts)
+		}
+		return fmt.Sprintf("retry #%d", c.RestartCount)
+	case process.StatusWaiting:
+		if len(c.DependsOn) > 0 {
+			return "waits " + c.DependsOn[0]
+		}
+		return "waiting"
+	default:
+		return c.Status.String()
+	}
+}
+
+// boxChars returns the border pieces for a cell. The selected cell gets a heavy
+// border as well as the caret — the caret alone is easy to lose among twenty
+// boxes, and a heavy edge reads at a glance without inverting a whole block.
+func boxChars(selected bool) (tl, tr, bl, br, h, v string, style lipgloss.Style) {
+	if selected {
+		return "┏", "┓", "┗", "┛", "━", "┃", lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
+	}
+	return "╭", "╮", "╰", "╯", "─", "│", lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+}
+
+// renderBoxedRow draws one row of boxed cells, returning its screen lines.
+// Boxes are separated by a gutter: butted together, adjacent borders read as a
+// doubled rule heavier than the boxes themselves.
+func renderBoxedRow(cells []GridCell, selectedAt int, cellWide int, card bool) []string {
+	const gutter = 1
+	boxWide := cellWide - gutter
+	inner := boxWide - 2
+	if inner < 3 {
+		inner = 3
+		boxWide = inner + 2
+	}
+
+	height := 3
+	if card {
+		height = 4
+	}
+	lines := make([]string, height)
+
+	for i, c := range cells {
+		selected := i == selectedAt
+		tl, tr, bl, br, h, v, style := boxChars(selected)
+
+		marker := " "
+		if selected {
+			marker = "›"
+		}
+
+		top := style.Render(tl + strings.Repeat(h, inner) + tr)
+		bottom := style.Render(bl + strings.Repeat(h, inner) + br)
+		name := style.Render(v) + padTo(marker+cellLabel(c, inner-3), inner) + style.Render(v)
+
+		lines[0] += top + strings.Repeat(" ", gutter)
+		lines[1] += name + strings.Repeat(" ", gutter)
+		if card {
+			detail := DimStyle.Render(truncate(cellDetail(c), inner-3))
+			lines[2] += style.Render(v) + padTo("   "+detail, inner) + style.Render(v) + strings.Repeat(" ", gutter)
+		}
+		lines[height-1] += bottom + strings.Repeat(" ", gutter)
+	}
+	return lines
+}
+
+// padTo pads to a display width, ignoring the styling escapes inside s.
+func padTo(s string, n int) string {
+	if d := n - lipgloss.Width(s); d > 0 {
+		return s + strings.Repeat(" ", d)
+	}
+	return s
+}
+
 func truncate(s string, max int) string {
 	if max <= 1 {
 		return "…"
@@ -362,61 +685,55 @@ func truncate(s string, max int) string {
 // View renders the grid, windowed to its height with the selection kept in
 // sight. It is deliberately non-mutating — see the note on Grid.selected.
 func (g Grid) View() string {
+	l := g.layout()
 	groups := g.visibleGroups()
 
-	var labels []string
-	for _, grp := range groups {
-		for _, c := range grp.Cells {
-			labels = append(labels, c.Name)
-		}
-	}
-
-	cols, cellWide := gridColumns(g.width, labels)
-	layout := gridLayout{cols: cols, cellWide: cellWide}
-	layout.rowOfCell = make([]int, 0, len(labels))
-
-	var lines []string
-	showTitles := len(groups) > 1 || (len(groups) == 1 && groups[0].Title != "")
-
-	for gi, grp := range groups {
-		if showTitles {
-			if gi > 0 {
-				lines = append(lines, "")
-			}
-			title := HeaderStyle.Render(grp.Title)
-			if grp.Subtitle != "" {
-				title += "  " + DimStyle.Render(grp.Subtitle)
-			}
-			lines = append(lines, title)
-		}
-		if grp.Note != "" && len(grp.Cells) == 0 {
-			lines = append(lines, "  "+DimStyle.Render(grp.Note))
-			continue
-		}
-
-		for start := 0; start < len(grp.Cells); start += cols {
-			end := start + cols
-			if end > len(grp.Cells) {
-				end = len(grp.Cells)
-			}
-			var row strings.Builder
-			for i := start; i < end; i++ {
-				flat := len(layout.rowOfCell)
-				layout.rowOfCell = append(layout.rowOfCell, len(lines))
-				row.WriteString(renderCell(grp.Cells[i], flat == g.selected, cellWide))
-			}
-			lines = append(lines, row.String())
-		}
-	}
-
-	if len(lines) == 0 {
+	if len(l.specs) == 0 {
 		if g.filter != "" {
 			return DimStyle.Render(fmt.Sprintf("no services matching %q", g.filter))
 		}
 		return DimStyle.Render("no services")
 	}
 
-	return strings.Join(g.window(lines, layout), "\n")
+	var lines []string
+	for _, spec := range l.specs {
+		switch spec.kind {
+		case lineBlank:
+			lines = append(lines, "")
+
+		case lineTitle:
+			grp := groups[spec.group]
+			title := HeaderStyle.Render(grp.Title)
+			if grp.Subtitle != "" {
+				title += "  " + DimStyle.Render(grp.Subtitle)
+			}
+			lines = append(lines, title)
+
+		case lineNote:
+			lines = append(lines, "  "+DimStyle.Render(groups[spec.group].Note))
+
+		case lineRow:
+			cells := make([]GridCell, len(spec.cells))
+			selectedAt := -1
+			for i, flat := range spec.cells {
+				cells[i] = l.cells[flat]
+				if flat == g.selected {
+					selectedAt = i
+				}
+			}
+			if g.cellStyle == CellPlain {
+				var row strings.Builder
+				for i, c := range cells {
+					row.WriteString(renderCell(c, i == selectedAt, l.cellWide))
+				}
+				lines = append(lines, row.String())
+				continue
+			}
+			lines = append(lines, renderBoxedRow(cells, selectedAt, l.cellWide, g.cellStyle == CellCard)...)
+		}
+	}
+
+	return strings.Join(g.window(lines, l), "\n")
 }
 
 // window trims the rendered lines to the grid's height, keeping the selected
@@ -430,8 +747,8 @@ func (g Grid) window(lines []string, layout gridLayout) []string {
 	}
 
 	selRow := 0
-	if g.selected >= 0 && g.selected < len(layout.rowOfCell) {
-		selRow = layout.rowOfCell[g.selected]
+	if g.selected >= 0 && g.selected < len(layout.lineOfCell) {
+		selRow = layout.lineOfCell[g.selected]
 	}
 
 	scroll := 0
@@ -458,6 +775,8 @@ func GridCellsFor(svcs []*process.Service) []GridCell {
 			HasHealth:    v.HasHealth,
 			RestartCount: v.RestartCount,
 			MaxRestarts:  v.MaxRestarts,
+			PID:          v.PID,
+			DependsOn:    v.DependsOn,
 		})
 	}
 	return cells

@@ -511,12 +511,27 @@ nothing. Pressing `v` sets `viewChosen`, after which resizes leave the choice al
 The grid is shared with the fleet dashboard, which is why it takes *groups* of cells rather than a
 flat list — one group per project there, exactly one here.
 
-Its only stored state is `groups`, `filter`, `width`, `height` and a flat `selected` index.
-**Everything else is derived on each render.** Bubble Tea passes `View()` a *copy* of the model, so
-a column count or scroll offset computed during a render would be discarded before the next
-keystroke; `Move` recomputes the column count from `gridColumns`, and `window` derives the scroll
-offset from the selection alone. `DashboardModel.Update` calls `refreshGrid()` (not `View`) to
-rebuild cells from live service state, for the same reason.
+Its only stored state is `groups`, `filter`, `width`, `height`, `cellStyle` and a flat `selected`
+index. **Everything else is derived on each render.** Bubble Tea passes `View()` a *copy* of the
+model, so a column count or scroll offset computed during a render would be discarded before the
+next keystroke. `DashboardModel.Update` calls `refreshGrid()` (not `View`) to rebuild cells from
+live service state, for the same reason.
+
+**`Grid.layout()` is the single source of geometry**, and both rendering and navigation read it.
+That is not incidental tidiness — it's a bug fix. The two used to compute geometry independently:
+rendering broke rows at every group boundary, while `Move` did flat arithmetic over a uniform column
+count (`selected + dy*cols`). In the fleet view, pressing down out of a project with fewer services
+than there were columns jumped a full row's worth of cells and skipped whole projects. `layout` now
+produces the visual rows explicitly, including the breaks between groups, so vertical movement steps
+between adjacent *rendered* rows and clamps into short ones. `TestGridMoveDownCrossesGroupBoundary`
+fails against the old arithmetic.
+
+Cell styles (`CellPlain`, `CellBoxed`, `CellCard`, cycled with `b`) change a row's height from one
+screen line to three or four. Navigation is unaffected — a row is one row however tall it draws —
+because `Move` walks `layout.rows` while `window` scrolls by `layout.lineOfCell`, which points at
+the *last* screen line of a row so scrolling brings the whole block into view. Card cells measure
+their detail text as well as their names when sizing columns, since `pid 2995280` is wider than
+`api`.
 
 Selection is tracked by **name**, not index, so it survives filtering — `syncGridSelection` and
 `syncActiveFromGrid` keep `m.active` and the grid pointing at the same service in both directions.

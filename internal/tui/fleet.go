@@ -182,6 +182,14 @@ func (m FleetModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case "b":
+		if !m.zoomed {
+			m.grid.CycleCellStyle()
+			m.resize()
+			return m.note("cells: " + m.grid.CellStyle().String()), nil
+		}
+		return m, nil
+
 	case "r":
 		return m.act("restart", func(id hub.InstanceID, svc string) error {
 			return m.hub.RestartService(id, svc)
@@ -385,6 +393,8 @@ func (m *FleetModel) refresh() {
 				HasHealth:    svc.HasHealth,
 				RestartCount: svc.RestartCount,
 				MaxRestarts:  svc.MaxRestarts,
+				PID:          svc.PID,
+				DependsOn:    svc.DependsOn,
 			})
 		}
 		if len(grp.Cells) == 0 {
@@ -482,7 +492,7 @@ func (m FleetModel) renderFooter() string {
 	if m.zoomed {
 		return FooterStyle.Render("↑↓ scroll  r restart  z back  q quit")
 	}
-	return FooterStyle.Render("↑↓←→ move  z logs  r restart  x stop  s start  S shut down project  / filter  q quit")
+	return FooterStyle.Render("↑↓←→ move  z logs  r restart  x stop  s start  S down  b cells  / filter  q quit")
 }
 
 // instanceSubtitle is the line beside a project's name: where it lives and what

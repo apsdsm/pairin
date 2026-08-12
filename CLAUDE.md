@@ -137,6 +137,7 @@ max_restarts = 5
 ## Key Design Decisions
 
 - **`svc.mu` is never held across `m.send()`** — the sink may be a socket, and a client that stops reading would otherwise pin the mutex and stall the tailer, healthchecks and the stop path. `startServiceLocked` returns `[]tea.Msg` for the caller to publish after unlocking; do the same for any new send inside a locked region.
+- **`Grid.layout()` is the only source of grid geometry** — rendering and navigation both read it. They once computed it separately and drifted, so vertical movement skipped whole groups
 - **Nothing computed in `View()` may be stored** — Bubble Tea renders from a copy of the model, so grid layout, column counts and scroll offsets are derived on each render; cell data is rebuilt in `Update` via `refreshGrid()`
 - **Render from `Service.View()`, never from live `Service` fields** — those are mutated concurrently by the manager's goroutines and the control client's read loop.
 - Each control-socket client has its own send queue and writer goroutine; `broadcast` only enqueues. On overflow, events are dropped and the client is resynced with a fresh snapshot.

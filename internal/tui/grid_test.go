@@ -197,3 +197,115 @@ func TestRenderCellPadsToWidth(t *testing.T) {
 // lipglossWidth is a thin alias so the test reads without an extra import at
 // the call sites.
 func lipglossWidth(s string) int { return lipgloss.Width(s) }
+
+// Vertical movement used to do flat arithmetic over a uniform column count
+// while rendering broke rows at every group boundary. Moving down out of a
+// short group therefore jumped by a whole row's worth of cells and skipped
+// past entire projects. Both now read the same layout.
+func TestGridMoveDownCrossesGroupBoundary(t *testing.T) {
+	g := NewGrid()
+	g.SetSize(80, 40) // 5 columns
+	g.SetGroups([]GridGroup{
+		{Title: "alpha", Cells: []GridCell{
+			{Key: "a/one", Name: "one", Status: process.StatusRunning},
+			{Key: "a/two", Name: "two", Status: process.StatusRunning},
+		}},
+		{Title: "beta", Cells: []GridCell{
+			{Key: "b/three", Name: "three", Status: process.StatusRunning},
+			{Key: "b/four", Name: "four", Status: process.StatusRunning},
+		}},
+		{Title: "gamma", Cells: []GridCell{
+			{Key: "c/five", Name: "five", Status: process.StatusRunning},
+		}},
+	})
+
+	// alpha has 2 cells in a 5-wide grid, so its single row is the whole group.
+	// Down from "one" must land on "three" — the first cell of the next group —
+	// not five cells further along the flat list.
+	if got := g.SelectedKey(); got != "a/one" {
+		t.Fatalf("setup: selection = %q, want a/one", got)
+	}
+
+	g.Move(0, 1)
+	if got := g.SelectedKey(); got != "b/three" {
+		t.Errorf("down from alpha landed on %q, want b/three", got)
+	}
+
+	g.Move(0, 1)
+	if got := g.SelectedKey(); got != "c/five" {
+		t.Errorf("down from beta landed on %q, want c/five", got)
+	}
+
+	// And back up again, symmetrically.
+	g.Move(0, -1)
+	if got := g.SelectedKey(); got != "b/three" {
+		t.Errorf("up from gamma landed on %q, want b/three", got)
+	}
+	g.Move(0, -1)
+	if got := g.SelectedKey(); got != "a/one" {
+		t.Errorf("up from beta landed on %q, want a/one", got)
+	}
+}
+
+// Moving down into a shorter row must clamp to that row's last cell rather
+// than overshoot into the row after it.
+func TestGridMoveDownClampsToShorterRow(t *testing.T) {
+	g := NewGrid()
+	g.SetSize(80, 40)
+	g.SetGroups([]GridGroup{
+		{Title: "alpha", Cells: []GridCell{
+			{Key: "a/1", Name: "one"}, {Key: "a/2", Name: "two"}, {Key: "a/3", Name: "three"},
+		}},
+		{Title: "beta", Cells: []GridCell{
+			{Key: "b/1", Name: "solo"},
+		}},
+	})
+
+	g.Move(2, 0) // third cell of alpha
+	if got := g.SelectedKey(); got != "a/3" {
+		t.Fatalf("setup: selection = %q, want a/3", got)
+	}
+	g.Move(0, 1)
+	if got := g.SelectedKey(); got != "b/1" {
+		t.Errorf("down from column 3 into a one-cell group landed on %q, want b/1", got)
+	}
+}
+
+// Vertical movement must not depend on the cell style: boxed rows are three
+// screen lines tall, but they are still one row.
+func TestGridMoveIsStyleIndependent(t *testing.T) {
+	build := func(style CellStyle) Grid {
+		g := NewGrid()
+		g.SetSize(80, 40)
+		g.SetCellStyle(style)
+		g.SetGroups([]GridGroup{
+			{Title: "alpha", Cells: []GridCell{{Key: "a/1", Name: "one"}, {Key: "a/2", Name: "two"}}},
+			{Title: "beta", Cells: []GridCell{{Key: "b/1", Name: "three"}}},
+		})
+		return g
+	}
+
+	for _, style := range []CellStyle{CellPlain, CellBoxed, CellCard} {
+		g := build(style)
+		g.Move(0, 1)
+		if got := g.SelectedKey(); got != "b/1" {
+			t.Errorf("%s: down landed on %q, want b/1", style, got)
+		}
+	}
+}
+
+// Each style must still fit the width it was given.
+func TestGridStylesFitWidth(t *testing.T) {
+	for _, style := range []CellStyle{CellPlain, CellBoxed, CellCard} {
+		g := NewGrid()
+		g.SetSize(80, 40)
+		g.SetCellStyle(style)
+		g.SetGroups([]GridGroup{{Title: "alpha", Cells: cells("postgres", "redis", "api", "worker", "web")}})
+
+		for i, line := range strings.Split(g.View(), "\n") {
+			if w := lipglossWidth(line); w > 80 {
+				t.Errorf("%s: line %d is %d wide, want at most 80: %q", style, i, w, line)
+			}
+		}
+	}
+}
