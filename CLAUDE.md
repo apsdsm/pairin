@@ -28,6 +28,7 @@ cmd/
   version.go                   # Version constant + `pairin version`
 internal/
   config/config.go             # TOML config loading, dir resolution, dependency/cycle validation
+  crash/crash.go               # Panic capture: Guard for goroutines, reports under $XDG_STATE_HOME/pairin/
   process/manager.go           # Process lifecycle, log capture, healthcheck polling, auto-restart, adoption
   control/
     protocol.go                # NDJSON wire format: Request / Event / Snapshot types
@@ -128,6 +129,10 @@ max_restarts = 5
 
 ## Key Design Decisions
 
+- **`svc.mu` is never held across `m.send()`** — the sink may be a socket, and a client that stops reading would otherwise pin the mutex and stall the tailer, healthchecks and the stop path. `startServiceLocked` returns `[]tea.Msg` for the caller to publish after unlocking; do the same for any new send inside a locked region.
+- **Render from `Service.View()`, never from live `Service` fields** — those are mutated concurrently by the manager's goroutines and the control client's read loop.
+- Each control-socket client has its own send queue and writer goroutine; `broadcast` only enqueues. On overflow, events are dropped and the client is resynced with a fresh snapshot.
+- Panics are captured (`internal/crash`) rather than allowed to vanish: the TUI runs with `tea.WithoutCatchPanics()` because Bubble Tea's own handler exits zero with no record
 - Process groups (`Setpgid`) ensure child processes of services are also cleaned up on stop
 - SIGINT with 5-second timeout before SIGKILL for graceful shutdown
 - Generation counter on Service prevents stale goroutines from updating state after a restart

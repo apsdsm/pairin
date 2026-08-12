@@ -12,6 +12,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/apsdsm/pairin/internal/config"
+	"github.com/apsdsm/pairin/internal/crash"
 	"github.com/apsdsm/pairin/internal/process"
 )
 
@@ -111,13 +112,13 @@ func (s *Server) eventFor(msg tea.Msg) (Event, bool) {
 		if m.Index < 0 || m.Index >= len(s.mgr.Services) {
 			return Event{}, false
 		}
-		svc := s.mgr.Services[m.Index]
+		v := s.mgr.Services[m.Index].View()
 		return Event{Kind: EvtStatus, Status: &StatusEvent{
-			Service:      svc.Config.Name,
+			Service:      v.Name,
 			Status:       m.Status.String(),
 			PID:          m.PID,
-			Branch:       svc.Branch,
-			RestartCount: svc.RestartCount,
+			Branch:       v.Branch,
+			RestartCount: v.RestartCount,
 		}}, true
 	case process.LogMsg:
 		if m.Index < 0 || m.Index >= len(s.mgr.Services) {
@@ -140,6 +141,10 @@ func (s *Server) eventFor(msg tea.Msg) (Event, bool) {
 	return Event{}, false
 }
 
+// broadcast hands the event to every client's send queue. Enqueuing never
+// blocks, so a client that has stopped reading its socket can no longer stall
+// the Manager goroutine that produced the event — nor the other clients, which
+// used to sit behind it in this loop.
 func (s *Server) broadcast(evt Event) {
 	s.mu.Lock()
 	clients := make([]*serverClient, 0, len(s.clients))
@@ -149,12 +154,7 @@ func (s *Server) broadcast(evt Event) {
 	s.mu.Unlock()
 
 	for _, c := range clients {
-		if err := c.write(evt); err != nil {
-			c.close()
-			s.mu.Lock()
-			delete(s.clients, c)
-			s.mu.Unlock()
-		}
+		c.enqueue(evt)
 	}
 }
 
@@ -164,15 +164,17 @@ func (s *Server) acceptLoop() {
 		if err != nil {
 			return
 		}
-		c := &serverClient{conn: conn, enc: json.NewEncoder(conn)}
+		c := newServerClient(conn, s.snapshot)
 		s.mu.Lock()
 		s.clients[c] = struct{}{}
 		s.mu.Unlock()
+		go c.writeLoop()
 		go s.handle(c)
 	}
 }
 
 func (s *Server) handle(c *serverClient) {
+	defer crash.Guard("control: client reader")
 	defer func() {
 		s.mu.Lock()
 		delete(s.clients, c)
@@ -182,9 +184,7 @@ func (s *Server) handle(c *serverClient) {
 
 	// First event to any new client is a fresh snapshot.
 	snap := s.snapshot()
-	if err := c.write(Event{Kind: EvtSnapshot, Snapshot: &snap}); err != nil {
-		return
-	}
+	c.enqueue(Event{Kind: EvtSnapshot, Snapshot: &snap})
 
 	reader := bufio.NewReader(c.conn)
 	dec := json.NewDecoder(reader)
@@ -250,54 +250,138 @@ func (s *Server) snapshot() Snapshot {
 }
 
 func serviceSnapshot(svc *process.Service) ServiceSnapshot {
-	// We read fields without locking; Service fields are written under
-	// svc.mu but the broadcast-from-Sink path already tolerates slightly
-	// stale views. For a snapshot, a torn read is acceptable because the
-	// next status event will correct it on the client side.
+	v := svc.View()
 	return ServiceSnapshot{
-		Name:         svc.Config.Name,
-		Short:        svc.Config.Short,
-		Color:        svc.Config.Color,
-		Dir:          svc.Config.Dir,
-		Cmd:          svc.Config.Cmd,
-		Status:       svc.Status.String(),
-		PID:          svc.PID,
-		Branch:       svc.Branch,
-		Healthy:      svc.Healthy,
-		HasHealth:    svc.Config.Healthcheck != "",
-		Adopted:      svc.Adopted,
-		LogFile:      svc.LogFile,
-		RestartCount: svc.RestartCount,
-		MaxRestarts:  svc.Config.MaxRestarts,
-		DependsOn:    svc.Config.DependsOn,
+		Name:         v.Name,
+		Short:        v.Short,
+		Color:        v.Color,
+		Dir:          v.Dir,
+		Cmd:          v.Cmd,
+		Status:       v.Status.String(),
+		PID:          v.PID,
+		Branch:       v.Branch,
+		Healthy:      v.Healthy,
+		HasHealth:    v.HasHealth,
+		Adopted:      v.Adopted,
+		LogFile:      v.LogFile,
+		RestartCount: v.RestartCount,
+		MaxRestarts:  v.MaxRestarts,
+		DependsOn:    v.DependsOn,
 	}
 }
 
-// serverClient is one connected TUI. Writes are serialized by the server's
-// broadcast loop; the encoder itself is not otherwise shared.
+// clientQueueSize bounds how far behind a client may fall before we start
+// dropping events. A few thousand events is several seconds of very chatty
+// output — past that the client isn't keeping up in any useful sense.
+const clientQueueSize = 4096
+
+// clientWriteTimeout bounds a single socket write. Without it, a client that
+// has been suspended (ctrl+z) or sits behind a stalled SSH pipe holds the
+// write open indefinitely and the writer goroutine never comes back.
+const clientWriteTimeout = 10 * time.Second
+
+// serverClient is one connected TUI. Events are queued and written by a
+// dedicated goroutine so that a slow or wedged client degrades only itself.
 type serverClient struct {
-	conn   net.Conn
-	enc    *json.Encoder
-	closed bool
-	mu     sync.Mutex
+	conn     net.Conn
+	enc      *json.Encoder
+	ch       chan Event
+	done     chan struct{}
+	once     sync.Once
+	snapshot func() Snapshot
+
+	// wmu serializes encoder access: writeLoop owns the normal path, but
+	// Shutdown writes its farewell event directly from the caller's goroutine.
+	wmu sync.Mutex
+
+	mu      sync.Mutex
+	dropped int
+	resync  bool
+}
+
+func newServerClient(conn net.Conn, snapshot func() Snapshot) *serverClient {
+	return &serverClient{
+		conn:     conn,
+		enc:      json.NewEncoder(conn),
+		ch:       make(chan Event, clientQueueSize),
+		done:     make(chan struct{}),
+		snapshot: snapshot,
+	}
+}
+
+// enqueue queues an event for delivery, never blocking. When the queue is full
+// the event is dropped and the client is flagged for resync — once it catches
+// up, writeLoop pushes a fresh snapshot, which restores correctness no matter
+// which events were lost.
+func (c *serverClient) enqueue(evt Event) {
+	select {
+	case <-c.done:
+		return
+	default:
+	}
+
+	select {
+	case c.ch <- evt:
+	default:
+		c.mu.Lock()
+		c.dropped++
+		c.resync = true
+		c.mu.Unlock()
+	}
+}
+
+func (c *serverClient) writeLoop() {
+	defer crash.Guard("control: client writer")
+	defer c.close()
+
+	for {
+		select {
+		case <-c.done:
+			return
+		case evt := <-c.ch:
+			if err := c.write(evt); err != nil {
+				return
+			}
+		}
+
+		// Caught up. If we dropped anything getting here, resend a snapshot so
+		// the client's view is authoritative again.
+		if len(c.ch) == 0 {
+			c.mu.Lock()
+			resync, dropped := c.resync, c.dropped
+			c.resync, c.dropped = false, 0
+			c.mu.Unlock()
+
+			if resync {
+				fmt.Fprintf(os.Stderr, "pairin: client fell behind, dropped %d event(s); resyncing\n", dropped)
+				snap := c.snapshot()
+				if err := c.write(Event{Kind: EvtSnapshot, Snapshot: &snap}); err != nil {
+					return
+				}
+			}
+		}
+	}
 }
 
 func (c *serverClient) write(evt Event) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+
+	select {
+	case <-c.done:
 		return errors.New("closed")
+	default:
+	}
+	if err := c.conn.SetWriteDeadline(time.Now().Add(clientWriteTimeout)); err != nil {
+		return err
 	}
 	return c.enc.Encode(evt)
 }
 
 func (c *serverClient) close() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
-		return
-	}
-	c.closed = true
-	_ = c.conn.Close()
+	c.once.Do(func() {
+		close(c.done)
+		_ = c.conn.Close()
+	})
 }
 

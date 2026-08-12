@@ -41,7 +41,7 @@ func NewPane(svc *process.Service, index int) Pane {
 // an empty screen. Bounded: reads at most the last 1 MB and keeps at most
 // maxLines lines.
 func (p *Pane) PreloadHistory(maxLines int) {
-	path := p.service.LogFile
+	path := p.service.View().LogFile
 	if path == "" {
 		return
 	}
@@ -91,8 +91,11 @@ func (p *Pane) ScrollDown(n int) {
 }
 
 func (p *Pane) titleLine(active bool) string {
-	svc := p.service
-	nameColor := ServiceColor(svc.Config.Color)
+	// A value snapshot, not the live struct: the supervisor's read loop mutates
+	// these fields while this render is in flight.
+	svc := p.service.View()
+
+	nameColor := ServiceColor(svc.Color)
 	nameStyle := lipgloss.NewStyle().Foreground(nameColor).Bold(true)
 
 	var statusStyle lipgloss.Style
@@ -113,8 +116,8 @@ func (p *Pane) titleLine(active bool) string {
 
 	statusText := svc.Status.String()
 	if svc.Status == process.StatusRestarting && svc.RestartCount > 0 {
-		if svc.Config.MaxRestarts > 0 {
-			statusText = fmt.Sprintf("restarting %d/%d", svc.RestartCount, svc.Config.MaxRestarts)
+		if svc.MaxRestarts > 0 {
+			statusText = fmt.Sprintf("restarting %d/%d", svc.RestartCount, svc.MaxRestarts)
 		} else {
 			statusText = fmt.Sprintf("restarting #%d", svc.RestartCount)
 		}
@@ -122,13 +125,13 @@ func (p *Pane) titleLine(active bool) string {
 
 	parts := []string{
 		DimStyle.Render(fmt.Sprintf("[%d]", p.index+1)),
-		nameStyle.Render(svc.Config.Name),
+		nameStyle.Render(svc.Name),
 		DimStyle.Render(svc.Branch),
 		statusStyle.Render(statusText),
 	}
 
 	// Show health indicator for running services with a healthcheck
-	if svc.Status == process.StatusRunning && svc.Config.Healthcheck != "" {
+	if svc.Status == process.StatusRunning && svc.HasHealth {
 		if svc.Healthy {
 			parts = append(parts, StatusHealthy.Render("healthy"))
 		} else {

@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/apsdsm/pairin/internal/config"
 	"github.com/apsdsm/pairin/internal/control"
+	"github.com/apsdsm/pairin/internal/crash"
 	"github.com/apsdsm/pairin/internal/process"
 	"github.com/apsdsm/pairin/internal/state"
 	"github.com/spf13/cobra"
@@ -36,7 +38,16 @@ func init() {
 	rootCmd.AddCommand(supervisorCmd)
 }
 
-func runSupervisor(cmd *cobra.Command, args []string) error {
+func runSupervisor(cmd *cobra.Command, args []string) (err error) {
+	// A panic here would take every managed service down with it. Record what
+	// happened and stop the services deliberately rather than by falling over.
+	defer func() {
+		if r := recover(); r != nil {
+			path := crash.Report("supervisor", r, debug.Stack())
+			err = fmt.Errorf("supervisor panicked; crash report: %s", path)
+		}
+	}()
+
 	if supervisorConfigPath == "" {
 		return fmt.Errorf("--config is required")
 	}

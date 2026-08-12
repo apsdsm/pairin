@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -14,6 +15,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/apsdsm/pairin/internal/config"
 	"github.com/apsdsm/pairin/internal/control"
+	"github.com/apsdsm/pairin/internal/crash"
 	"github.com/apsdsm/pairin/internal/state"
 	"github.com/apsdsm/pairin/internal/tui"
 	"github.com/spf13/cobra"
@@ -122,16 +124,41 @@ func attachTUI(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("attaching to supervisor: %w", err)
 	}
+	defer client.Close()
 
 	model := tui.NewDashboardModel(cfg, client)
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	// WithoutCatchPanics: Bubble Tea's own handler prints a stack to a screen
+	// it is simultaneously tearing down and lets Run return a nil error, so a
+	// TUI panic looks exactly like a clean exit. We'd rather have a report.
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithoutCatchPanics())
 	client.SetProgram(p)
 
-	if _, err := p.Run(); err != nil {
-		_ = client.Close()
-		return fmt.Errorf("TUI error: %w", err)
+	if err := runProgram(p); err != nil {
+		return err
 	}
-	_ = client.Close()
+	return nil
+}
+
+// runProgram runs the Bubble Tea program, converting a panic into a crash
+// report and an error rather than a silent exit. Services are owned by the
+// supervisor, so a TUI crash leaves them running — the message says so, since
+// the alternative reading ("everything just died") is the alarming one.
+func runProgram(p *tea.Program) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			p.Kill() // restores the terminal
+			path := crash.Report("tui", r, debug.Stack())
+			if path != "" {
+				err = fmt.Errorf("pairin's TUI crashed (your services are still running).\nCrash report: %s\nReattach with `pairin attach`", path)
+			} else {
+				err = fmt.Errorf("pairin's TUI crashed (your services are still running): %v", r)
+			}
+		}
+	}()
+
+	if _, runErr := p.Run(); runErr != nil {
+		return fmt.Errorf("TUI error: %w", runErr)
+	}
 	return nil
 }
 

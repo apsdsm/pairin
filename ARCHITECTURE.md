@@ -19,13 +19,17 @@ internal/
   config/
     config.go                     TOML config loading, dir resolution, validation
     config_test.go                Validation tests (deps, cycles, restart policies)
+  crash/
+    crash.go                      Panic capture: Guard for goroutines, Report writes to the state dir
+    crash_test.go                 Guard recovers, report lands under XDG_STATE_HOME
   process/
     manager.go                    Process lifecycle, log capture, healthchecks, auto-restart, adoption, mirror services
     manager_test.go               Ring buffer, healthcheck, dependency, restart tests
   control/
     protocol.go                   NDJSON wire format: Request / Event / Snapshot types
-    server.go                     Supervisor: socket listener, Sink that broadcasts manager events
-    client.go                     TUI: dial socket, mirror services, re-emit events as tea.Msg
+    server.go                     Supervisor: socket listener, per-client send queues, Sink that broadcasts manager events
+    client.go                     TUI: dial socket, mirror services, reconnect, re-emit events as tea.Msg
+    server_test.go                Transport tests: snapshot-on-connect, wedged client, overflow resync, reconnect
   state/
     state.go                      .pairin/state.json + supervisor.pid + IsProcessAlive helpers
     registry.go                   Host-wide instance registry under $XDG_STATE_HOME/pairin/instances/
@@ -117,14 +121,18 @@ A new client always receives an `EvtSnapshot` first, then a stream of incrementa
 
 - Wraps a `*process.Manager`. Once `Start(socketPath)` succeeds, the server installs itself as the manager's `Sink`, so every `tea.Msg` the manager produces is routed through `eventFor` and broadcast as a protocol `Event` to every connected client.
 - Maintains a `clients map[*serverClient]struct{}` under a mutex. Broadcast iterates a snapshot copy of that map so writes never hold the lock during I/O.
+- **Each client owns a send queue and a writer goroutine.** `broadcast` only enqueues, and enqueuing never blocks. This is what keeps one misbehaving client — suspended with `ctrl+z`, or on the far end of a stalled SSH pipe — from stalling the Manager goroutine that produced the event, and from blocking every other client behind it in the broadcast loop.
+- When a client's queue overflows, events are **dropped** and the client is flagged for resync; once it catches up, the writer sends a fresh `EvtSnapshot`. Dropping is safe precisely because of this: whatever was lost, the snapshot makes the client's view authoritative again. Drops are logged to `supervisor.log`.
+- Every socket write carries a `clientWriteTimeout` deadline, so a client that never reads is disconnected rather than pinning a writer goroutine forever.
 - `dispatch` handles incoming requests by looking up the service by name (clients never see indices), then calling the corresponding manager method on a fresh goroutine — never blocking the read loop.
 - `Shutdown` is idempotent. It closes the listener, broadcasts a final `EvtShutdown` event, closes every client conn, and `close()`s the `shutdown` channel so `Done()` waiters return.
 
 ### Client (`control.Client`)
 
-- `Dial` opens the socket, starts a read loop, and blocks until either the initial snapshot arrives, the connection drops, or 5 seconds elapse.
-- The first snapshot allocates `*process.Service` mirrors via `process.NewMirrorService` and builds a `nameToIdx` map. Subsequent snapshots **update fields in place** rather than rebuilding the slice, so pointers held by the TUI stay valid.
-- Each incoming event mutates the mirror service and forwards a translated `tea.Msg` (`StatusMsg`, `LogMsg`, `HealthCheckMsg`) to the TUI's `tea.Program` (installed via `SetProgram` / `SetSink`). The model's `Update` function is identical to the local-manager case.
+- `Dial` opens the socket, starts a read loop, and blocks until either the initial snapshot arrives, the connection drops, or 5 seconds elapse. It is a thin wrapper over `Reconnect`.
+- `Reconnect` re-establishes a dropped connection on the same client. The read loop takes its conn, `done` and `ready` channels **as parameters** rather than reading them off the struct, so a reconnect can never leave an old loop operating on a replaced socket. `Done()` returns the current connection's channel, so callers must re-read it after reconnecting rather than caching it.
+- The first snapshot allocates `*process.Service` mirrors via `process.NewMirrorService` and builds a `nameToIdx` map. Subsequent snapshots **update fields in place** rather than rebuilding the slice, so pointers held by the TUI survive a supervisor restart.
+- Each incoming event mutates the mirror service **through `Service`'s locked mutators** (`ApplyStatus`, `ApplyHealth`, `AppendLog`, `UpdateMirror`) and forwards a translated `tea.Msg` (`StatusMsg`, `LogMsg`, `HealthCheckMsg`) to the TUI's `tea.Program` (installed via `SetProgram` / `SetSink`). The model's `Update` function is identical to the local-manager case.
 - `StopAll()` is a deliberate no-op in client mode (`q` is detach, not stop). `Shutdown()` is the explicit "kill everything" path used by the `d` key and `pairin down`.
 
 ## State and Registry
@@ -522,9 +530,27 @@ Manual restart (`r` key) resets `RestartCount` to 0, giving the service a fresh 
 
 | Lock | Protects | Held by |
 |------|----------|---------|
-| `svc.mu` | `Status`, `PID`, `cmd`, `Branch`, `Logs`, `Healthy`, `generation`, `RestartCount`, `healthCancel` | `startService`, `stopService`, `captureOutput`, `waitForExit`, `healthcheckPoller`, `autoRestartService`, `GetLines` |
+| `svc.mu` | `Status`, `PID`, `cmd`, `Branch`, `Logs`, `Healthy`, `generation`, `RestartCount`, `healthCancel` | `startService`, `stopService`, `captureOutput`, `waitForExit`, `healthcheckPoller`, `autoRestartService`, `GetLines`, `View`, the `Apply*` mirror mutators |
 | `m.mu` (manager) | `m.sink`, `m.err` | `send`, `SetSink`/`SetProgram`, `Error` |
 | `s.mu` (control.Server) | `s.clients`, `s.closed`, `s.ln` | `acceptLoop`, `handle`, `broadcast`, `Shutdown` |
-| `c.mu` (control.Client) | `c.conn`, `c.enc`, `c.sink`, `c.err` | `Dial`, `send`, `readLoop`, `forward`, `SetSink` |
+| `c.mu` (serverClient) | `dropped`, `resync` | `enqueue`, `writeLoop` |
+| `c.wmu` (serverClient) | the JSON encoder | `write` (writer goroutine and `Shutdown`) |
+| `c.mu` (control.Client) | `c.conn`, `c.enc`, `c.done`, `c.sink`, `c.err`, `ProjectName` | `Reconnect`, `send`, `readLoop`, `forward`, `SetSink`, `Done` |
 
-Critical invariant: `svc.mu` is **never held** while waiting for a process to exit or while calling `m.send()` from `captureOutput`. This prevents deadlocks between pipe draining and process shutdown. Similarly, `control.Server.broadcast` releases `s.mu` before writing to any client, so a stuck/slow client can't block the manager's event path.
+**Critical invariant: `svc.mu` is never held across `m.send()`.** The sink on the other end may be a socket broadcaster, and a client that has stopped reading can block that write. Holding the service lock across it would pin the mutex for as long as the client stays wedged, stalling the log tailer, the healthcheck poller and the stop path with it. `startService` and `waitForExit` therefore *collect* their status messages while locked and publish them after unlocking — see `startServiceLocked`, which returns `[]tea.Msg` for exactly this reason. Adding a new `m.send()` call inside a locked region reintroduces the stall.
+
+**Rendering reads value snapshots, never live structs.** `Service.View()` returns a `ServiceView` copy taken under `svc.mu`. The TUI renders from that, because the manager's goroutines (and, on a mirror, the control client's read loop) mutate those fields while a render is in flight. Reading `svc.Status` or `svc.Branch` directly from render code is a data race.
+
+`control.Server.broadcast` releases `s.mu` before touching any client, and only ever enqueues, so a stuck or slow client cannot block the manager's event path.
+
+## Crash Reporting
+
+A panic used to make pairin disappear. In the TUI it was worse than a hard crash: Bubble Tea's built-in handler prints a stack trace to a screen it is simultaneously tearing down, then lets `Run` return a **nil** error — so pairin exited zero and the terminal (or tmux pane) simply closed with nothing recorded.
+
+`internal/crash` fixes that:
+
+- `crash.Guard(context)` is deferred at the top of every long-lived goroutine — the log tailer, `waitForExit`, the healthcheck poller, `autoRestartService`, `watchAdopted`, `persistState`, `StopAll`'s workers, and both sides of the control socket. The goroutine dies; the process survives.
+- Reports go to `$XDG_STATE_HOME/pairin/crash-<timestamp>-<pid>.log` with the version, PID, cwd, context and full stack.
+- The TUI runs with `tea.WithoutCatchPanics()` so pairin's own handler runs instead: it calls `p.Kill()` to restore the terminal, writes a report, and returns an error naming the report path — and says plainly that services are still running, since the alarming reading is the wrong one.
+- `runSupervisor` has the same net at its top level, because a panic there would take every managed service down with it.
+- TUI commands are wrapped in `guarded(...)`, since Bubble Tea runs each command on its own goroutine where an unrecovered panic is fatal to the process.
