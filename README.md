@@ -52,8 +52,12 @@ pairin
 |-----------------------------|------------------------------------------------------------------------------|
 | `pairin` (or `pairin up`)   | Start the supervisor for this project (or attach if one is already running)  |
 | `pairin -d` (or `pairin up -d`) | Start the supervisor in the background and exit without attaching a TUI |
-| `pairin attach`             | Attach a TUI to a supervisor that's already running for this project         |
-| `pairin down`               | Stop all services and the supervisor for this project                        |
+| `pairin up <project>`       | Start a **registered** project by name, from anywhere                        |
+| `pairin attach [project]`   | Attach a TUI to a supervisor that's already running                          |
+| `pairin down [project]`     | Stop all services and the supervisor                                         |
+| `pairin register [path]`    | Add a project to the catalog so it can be started by name                    |
+| `pairin unregister <name>`  | Remove a project from the catalog                                            |
+| `pairin projects`           | List registered projects and whether each is running                         |
 | `pairin ls`                 | List every running pairin supervisor on this host                            |
 | `pairin status`             | Show per-service status across every running supervisor                      |
 | `pairin version`            | Print the version                                                            |
@@ -63,6 +67,41 @@ If a previous supervisor exited without cleaning up, `pairin up` detects the orp
 `-d` / `--detach` is idempotent: if a supervisor is already running for this project, it prints the existing PID and exits without doing anything.
 
 `--clear-logs` (on `pairin` / `pairin up`) deletes the existing service logs in `.pairin/logs/` before starting, so the TUI opens with fresh panes instead of preloading history from previous sessions. It refuses to run while a supervisor is already up — stop it with `pairin down` first.
+
+## The Project Catalog
+
+Rather than cd-ing around to find configs, register your projects once and start them by name from
+anywhere:
+
+```bash
+pairin register                  # register the project in the current directory
+pairin register ~/Code/acme-api  # or one somewhere else
+pairin projects                  # see what's registered, and what's running
+
+pairin up acme-api               # start it, from any directory
+pairin up acme                   # unique prefixes work too
+pairin down acme-api
+```
+
+Running `pairin up` in a project registers it automatically, so the catalog fills itself in as you
+work. Pass `--no-register` to opt out of that for a particular project.
+
+Names are slugs derived from the `[project].name` in the config — "Acme API (localdev)" becomes
+`acme-api-localdev` — because display names with spaces and parentheses make poor things to type.
+Override with `pairin register --name <slug>`; a name you chose is never overwritten. Use `--group`
+to label entries for the listing.
+
+A prefix that matches more than one project is refused rather than guessed:
+
+```
+$ pairin up acme
+Error: "acme" matches 2 projects (acme-api-localdev, acme-worker) — be more specific
+```
+
+The catalog lives at `$XDG_CONFIG_HOME/pairin/projects.toml` (default `~/.config/pairin/projects.toml`).
+It's config, not state: it survives a state cleanup, it's safe to hand-edit, and it's reasonable to
+keep in a dotfiles repo. `pairin projects` flags entries whose config file has moved or been deleted
+rather than quietly reporting them as stopped.
 
 ### `-c` / `--config`
 

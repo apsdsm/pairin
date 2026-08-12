@@ -13,6 +13,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/apsdsm/pairin/internal/catalog"
 	"github.com/apsdsm/pairin/internal/config"
 	"github.com/apsdsm/pairin/internal/control"
 	"github.com/apsdsm/pairin/internal/crash"
@@ -36,9 +37,16 @@ var configFlag string
 // TUI doesn't preload history from previous sessions.
 var clearLogsFlag bool
 
+// noRegisterFlag opts out of adding the project to the catalog on `up`.
+var noRegisterFlag bool
+
 var rootCmd = &cobra.Command{
-	Use:           "pairin",
-	Short:         "Local development process manager",
+	Use:   "pairin [project]",
+	Short: "Local development process manager",
+	Long: "Start or attach to the supervisor for a project.\n\n" +
+		"With no argument, uses the .pairinrc.toml found from the current directory.\n" +
+		"With a registered project name, works from anywhere — see `pairin projects`.",
+	Args:          cobra.MaximumNArgs(1),
 	RunE:          runUp,
 	SilenceUsage:  true,
 	SilenceErrors: false,
@@ -48,12 +56,42 @@ func init() {
 	rootCmd.Flags().BoolVarP(&detachFlag, "detach", "d", false, "start the supervisor in the background and exit without attaching a TUI")
 	rootCmd.Flags().StringVarP(&configFlag, "config", "c", "", "path to a .pairinrc.toml (defaults to searching cwd up to root)")
 	rootCmd.Flags().BoolVar(&clearLogsFlag, "clear-logs", false, "delete existing service logs before starting, so the TUI doesn't preload old history")
+	rootCmd.Flags().BoolVar(&noRegisterFlag, "no-register", false, "don't add this project to the catalog")
 }
 
-// loadConfig loads the project config, honoring the --config flag if set.
-// Relative paths are resolved against the current working directory; the
-// supervisor is always handed an absolute path so its own cwd doesn't matter.
-func loadConfig() (*config.Config, error) {
+// resolveConfig loads the config a command should act on, in priority order:
+// an explicit --config, a registered project name given as an argument, or a
+// search upward from the current directory.
+//
+// Relative paths are resolved against the working directory; the supervisor is
+// always handed an absolute path so its own cwd doesn't matter.
+func resolveConfig(cmd *cobra.Command, args []string) (*config.Config, error) {
+	// An empty argument is treated as no argument rather than as a project
+	// named "", which nothing can ever match.
+	if len(args) > 0 && strings.TrimSpace(args[0]) == "" {
+		args = nil
+	}
+
+	if len(args) > 0 && configFlag != "" {
+		return nil, fmt.Errorf("give either a project name or --config, not both")
+	}
+
+	if len(args) > 0 {
+		cat, err := catalog.Load()
+		if err != nil {
+			return nil, fmt.Errorf("loading catalog: %w", err)
+		}
+		entry, err := cat.Find(args[0])
+		if err != nil {
+			return nil, withCommandHint(cmd, args[0], err)
+		}
+		cfg, err := config.LoadFrom(entry.Config)
+		if err != nil {
+			return nil, fmt.Errorf("loading config for %q: %w", entry.Name, err)
+		}
+		return cfg, nil
+	}
+
 	if configFlag == "" {
 		return config.Load()
 	}
@@ -62,6 +100,44 @@ func loadConfig() (*config.Config, error) {
 		return nil, fmt.Errorf("resolving --config path: %w", err)
 	}
 	return config.LoadFrom(abs)
+}
+
+// loadConfig is resolveConfig with no positional argument.
+func loadConfig() (*config.Config, error) { return resolveConfig(nil, nil) }
+
+// withCommandHint softens the "no such project" error when the argument looks
+// like a mistyped subcommand — `pairin statu` should point at `status` rather
+// than send the user off to check their catalog.
+func withCommandHint(cmd *cobra.Command, arg string, err error) error {
+	if cmd == nil || arg == "" {
+		return err
+	}
+	for _, sub := range cmd.Root().Commands() {
+		if sub.Hidden {
+			continue
+		}
+		if strings.HasPrefix(sub.Name(), arg) {
+			return fmt.Errorf("%w\n(did you mean `pairin %s`?)", err, sub.Name())
+		}
+	}
+	return err
+}
+
+// autoRegister adds the project to the catalog so it can be started by name
+// later. Best-effort: a catalog problem must not stop services from starting.
+func autoRegister(cfg *config.Config) {
+	if noRegisterFlag {
+		return
+	}
+	cat, err := catalog.Load()
+	if err != nil {
+		return
+	}
+	added, err := cat.Add(catalog.Project{Display: cfg.Project.Name, Config: cfg.Path})
+	if err != nil || !added {
+		return
+	}
+	_ = cat.Save()
 }
 
 func Execute() error {
@@ -73,10 +149,11 @@ func Execute() error {
 // --detach is set). Otherwise, prompt about any stale state, spawn a
 // detached supervisor, and either attach a TUI or exit cleanly.
 func runUp(cmd *cobra.Command, args []string) error {
-	cfg, err := loadConfig()
+	cfg, err := resolveConfig(cmd, args)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
+	autoRegister(cfg)
 
 	// Case 1: supervisor already running.
 	if holder := state.LockHolder(cfg.Path); holder > 0 && state.IsProcessAlive(holder) {

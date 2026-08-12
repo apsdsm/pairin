@@ -227,7 +227,7 @@ discipline, with more state to get it wrong with.
 Grid selection is tracked by **name**, not index, so it survives filtering and services appearing or
 disappearing — worth keeping when groups start coming and going as projects start and stop.
 
-### Phase 2 — Project catalog *(fixes "hunting for config files")*
+### Phase 2 — Project catalog *(fixes "hunting for config files")* — **shipped on `fleet-stability`**
 
 New `internal/catalog/catalog.go`, backed by `$XDG_CONFIG_HOME/pairin/projects.toml` (fallback
 `~/.config/pairin/projects.toml`) — config, not state, so it survives cleanup and can live in dotfiles:
@@ -251,6 +251,21 @@ fills itself in as you work. Entries whose config file has disappeared are flagg
 output but never silently deleted.
 
 **Done when:** `pairin up acme-api` works from `~`.
+
+**Outcome.** Landed, with two decisions worth recording:
+
+- Catalog names are **slugs**, not display names. Real project names look like `JJC2 (localdev)` and
+  make poor command-line arguments, so `Slugify` turns that into `jjc2-localdev`. Collisions qualify
+  with the parent directory before falling back to a counter, since several checkouts of one project
+  legitimately share a display name. An explicitly chosen `--name` is never overwritten by a later
+  auto-registration.
+- Lookup accepts a unique **prefix**, but an ambiguous one is refused rather than resolved:
+  `pairin up acme` matching two projects errors instead of picking. Starting the wrong project's
+  services isn't a mistake you can undo by pressing ctrl-C.
+
+`resolveConfig` in `cmd/root.go` is now the single place that decides which config a command acts
+on — `--config` > catalog name > search from cwd. The fleet dashboard's "start this project" action
+should go through the catalog the same way rather than growing its own path handling.
 
 ### Phase 3 — The hub
 

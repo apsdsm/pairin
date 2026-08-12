@@ -23,10 +23,12 @@ cmd/
   attach.go                    # `pairin attach`: connect a TUI to an existing supervisor
   down.go                      # `pairin down`: tell the supervisor to stop everything and exit
   ls.go                        # `pairin ls`: list supervisors across the host
+  projects.go                  # `pairin register` / `unregister` / `projects`: the project catalog
   status.go                    # `pairin status`: per-service status across every supervisor
   supervisor.go                # Hidden `pairin supervisor`: the detached background worker
   version.go                   # Version constant + `pairin version`
 internal/
+  catalog/catalog.go           # User's registered projects: $XDG_CONFIG_HOME/pairin/projects.toml
   config/config.go             # TOML config loading, dir resolution, dependency/cycle validation
   crash/crash.go               # Panic capture: Guard for goroutines, reports under $XDG_STATE_HOME/pairin/
   process/manager.go           # Process lifecycle, log capture, healthcheck polling, auto-restart, adoption

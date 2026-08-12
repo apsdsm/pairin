@@ -19,6 +19,9 @@ internal/
   config/
     config.go                     TOML config loading, dir resolution, validation
     config_test.go                Validation tests (deps, cycles, restart policies)
+  catalog/
+    catalog.go                    Registered projects: load/save, name derivation, prefix lookup
+    catalog_test.go               Slugs, unique names, idempotent Add, ambiguous lookup
   crash/
     crash.go                      Panic capture: Guard for goroutines, Report writes to the state dir
     crash_test.go                 Guard recovers, report lands under XDG_STATE_HOME
@@ -137,6 +140,34 @@ A new client always receives an `EvtSnapshot` first, then a stream of incrementa
 - The first snapshot allocates `*process.Service` mirrors via `process.NewMirrorService` and builds a `nameToIdx` map. Subsequent snapshots **update fields in place** rather than rebuilding the slice, so pointers held by the TUI survive a supervisor restart.
 - Each incoming event mutates the mirror service **through `Service`'s locked mutators** (`ApplyStatus`, `ApplyHealth`, `AppendLog`, `UpdateMirror`) and forwards a translated `tea.Msg` (`StatusMsg`, `LogMsg`, `HealthCheckMsg`) to the TUI's `tea.Program` (installed via `SetProgram` / `SetSink`). The model's `Update` function is identical to the local-manager case.
 - `StopAll()` is a deliberate no-op in client mode (`q` is detach, not stop). `Shutdown()` is the explicit "kill everything" path used by the `d` key and `pairin down`.
+
+## Catalog vs. Registry
+
+Two different lists, deliberately kept apart:
+
+| | Catalog | Instance registry |
+|---|---|---|
+| Question it answers | which projects do I *know about* | which supervisors are *running now* |
+| Location | `$XDG_CONFIG_HOME/pairin/projects.toml` | `$XDG_STATE_HOME/pairin/instances/<hash>.json` |
+| Written by | `pairin register`, and `up` (auto) | the supervisor, on start |
+| Lifetime | curated; survives cleanup; hand-editable | derived; self-cleans when a PID dies |
+
+The catalog is *config*, which is why it isn't under the state dir: a user should be able to wipe
+`~/.local/state/pairin` without losing their project list, and should be able to keep the file in a
+dotfiles repo.
+
+`resolveConfig` (cmd/root.go) is the single entry point that decides which config a command acts on:
+an explicit `--config` wins, then a catalog lookup on a positional argument, then a search upward
+from the cwd. `pairin`, `up`, `attach` and `down` all route through it.
+
+Lookup order inside `Catalog.Find` is exact name → exact config path → unique name prefix. An
+ambiguous prefix returns `ErrAmbiguous` rather than picking one: starting the wrong project's
+services isn't a mistake the user can undo by pressing ctrl-C.
+
+Catalog names are slugs (`Slugify`) rather than display names, because real project names look like
+`JJC2 (localdev)` and make poor command-line arguments. Collisions are resolved by qualifying with
+the parent directory before falling back to a counter — several checkouts of one project legitimately
+share a display name. An explicitly chosen name is never overwritten by a later auto-registration.
 
 ## State and Registry
 

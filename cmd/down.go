@@ -10,8 +10,9 @@ import (
 )
 
 var downCmd = &cobra.Command{
-	Use:   "down",
-	Short: "Stop all services and the supervisor for this project",
+	Use:   "down [project]",
+	Short: "Stop all services and the supervisor for a project",
+	Args:  cobra.MaximumNArgs(1),
 	RunE:  runDown,
 }
 
@@ -21,7 +22,7 @@ func init() {
 }
 
 func runDown(cmd *cobra.Command, args []string) error {
-	cfg, err := loadConfig()
+	cfg, err := resolveConfig(cmd, args)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
