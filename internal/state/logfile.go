@@ -42,6 +42,25 @@ func ClearLogs(configPath string) error {
 	return nil
 }
 
+// TruncateLog empties a service's log in place and discards its rotated
+// predecessor.
+//
+// Unlike ClearLogs this is safe while the supervisor is running. Services are
+// started with O_APPEND, so every write goes to the current end of the file:
+// after truncating to zero the child simply resumes writing from the start,
+// with no sparse gap. Unlinking the file would instead leave the child writing
+// to an inode nobody can read any more. The log tailer already detects a file
+// shrinking below its read offset and starts over.
+func TruncateLog(path string) error {
+	if err := os.Truncate(path, 0); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Remove(path + ".1"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 // RotateIfLarge renames <path> to <path>.1 when it exceeds MaxLogBytes. Any
 // existing <path>.1 is overwritten. If the file does not exist or is smaller
 // than the threshold, no action is taken.

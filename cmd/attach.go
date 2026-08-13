@@ -8,8 +8,9 @@ import (
 )
 
 var attachCmd = &cobra.Command{
-	Use:   "attach",
-	Short: "Attach a TUI to an already-running supervisor in this project",
+	Use:   "attach [project]",
+	Short: "Attach a TUI to an already-running supervisor",
+	Args:  cobra.MaximumNArgs(1),
 	RunE:  runAttach,
 }
 
@@ -19,7 +20,7 @@ func init() {
 }
 
 func runAttach(cmd *cobra.Command, args []string) error {
-	cfg, err := loadConfig()
+	cfg, err := resolveConfig(cmd, args)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}

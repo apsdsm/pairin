@@ -23,9 +23,10 @@ type Instance struct {
 	StartedAt     time.Time `json:"started_at"`
 }
 
-// InstanceDir returns the directory where supervisor registry files are
-// written. Respects XDG_STATE_HOME, falling back to ~/.local/state.
-func InstanceDir() (string, error) {
+// BaseDir returns pairin's host-wide state directory — the root that holds the
+// instance registry and crash reports. Respects XDG_STATE_HOME, falling back
+// to ~/.local/state.
+func BaseDir() (string, error) {
 	base := os.Getenv("XDG_STATE_HOME")
 	if base == "" {
 		home, err := os.UserHomeDir()
@@ -34,7 +35,17 @@ func InstanceDir() (string, error) {
 		}
 		base = filepath.Join(home, ".local", "state")
 	}
-	return filepath.Join(base, "pairin", "instances"), nil
+	return filepath.Join(base, "pairin"), nil
+}
+
+// InstanceDir returns the directory where supervisor registry files are
+// written.
+func InstanceDir() (string, error) {
+	base, err := BaseDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "instances"), nil
 }
 
 // instanceFile returns the absolute path of the registry file for configPath.

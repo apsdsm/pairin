@@ -19,19 +19,40 @@ internal/
   config/
     config.go                     TOML config loading, dir resolution, validation
     config_test.go                Validation tests (deps, cycles, restart policies)
+  browse/
+    browse.go                     Directory listing for the project picker: dirs, configs, counts
+    browse_test.go                Ordering, project names, config counts, skip list
+  catalog/
+    catalog.go                    Registered projects: load/save, name derivation, prefix lookup
+    catalog_test.go               Slugs, unique names, idempotent Add, ambiguous lookup
+  hub/
+    hub.go                        Connections to every supervisor on the host; tagged events
+    hub_test.go                   Multi-supervisor connect, stopped-project stubs, disconnect
+  launcher/
+    launcher.go                   Spawning detached supervisors, shared by the CLI and the dashboard
+  crash/
+    crash.go                      Panic capture: Guard for goroutines, Report writes to the state dir
+    crash_test.go                 Guard recovers, report lands under XDG_STATE_HOME
   process/
     manager.go                    Process lifecycle, log capture, healthchecks, auto-restart, adoption, mirror services
     manager_test.go               Ring buffer, healthcheck, dependency, restart tests
   control/
     protocol.go                   NDJSON wire format: Request / Event / Snapshot types
-    server.go                     Supervisor: socket listener, Sink that broadcasts manager events
-    client.go                     TUI: dial socket, mirror services, re-emit events as tea.Msg
+    server.go                     Supervisor: socket listener, per-client send queues, Sink that broadcasts manager events
+    client.go                     TUI: dial socket, mirror services, reconnect, re-emit events as tea.Msg
+    server_test.go                Transport tests: snapshot-on-connect, wedged client, overflow resync, reconnect
   state/
     state.go                      .pairin/state.json + supervisor.pid + IsProcessAlive helpers
     registry.go                   Host-wide instance registry under $XDG_STATE_HOME/pairin/instances/
+    ui.go                         Remembered interface state (grid cell style)
     logfile.go                    Per-service log paths and 10 MiB rotation threshold
   tui/
-    model.go                      Bubble Tea model: keys, layout, split/focus views; uses Backend interface
+    model.go                      Bubble Tea model: keys, layout, split/grid/focus views; uses Backend interface
+    grid.go                       Compact status grid, grouped and filterable; shared by both models
+    fleet.go                      Host-wide dashboard model over a hub
+    grid_test.go                  Column geometry, navigation, filtering, windowing
+    model_test.go                 View auto-degrade, zoom, filter input, render fits the terminal
+    fleet_test.go                 Multi-project rendering, cross-project selection, zoom log routing
     pane.go                       Single service pane: viewport, title bar, log rendering
     tail.go                       Preload last N lines from on-disk log files when attaching
     styles.go                     Lipgloss styles, color map
@@ -109,7 +130,17 @@ Client -> Server (Request)              Server -> Client (Event)
 {"kind":"stop",   "service":"web"}      {"kind":"log",      "log":      {...}}
 {"kind":"start",  "service":"web"}      {"kind":"health",   "health":   {...}}
 {"kind":"shutdown"}                     {"kind":"shutdown"}
+{"kind":"subscribe","log_mode":"none"}  {"kind":"logs_cleared","logs_cleared":{...}}
+{"kind":"clear_logs","service":"web"}
 ```
+
+`clear_logs` with an empty `service` clears every service in the project. The supervisor **truncates**
+the log rather than unlinking it: services are started with `O_APPEND`, so after truncation the child
+resumes writing from the start of the file, whereas unlinking would leave it writing to an inode
+nobody can read. (`pairin --clear-logs` *does* delete the files, which is why it only works before a
+supervisor starts.) The tailer already handles a file shrinking below its read offset. Clients drop
+their mirrored copy on `logs_cleared`, and panes clear themselves — a pane holds its own slice of
+lines, so emptying the ring buffer behind it is not enough.
 
 A new client always receives an `EvtSnapshot` first, then a stream of incremental events. The snapshot contains everything the TUI needs to render before any further events arrive (project name, started-at timestamp, and per-service name/short/color/dir/cmd/status/PID/branch/health/adopted/log_file/restart_count/max_restarts/depends_on).
 
@@ -117,15 +148,143 @@ A new client always receives an `EvtSnapshot` first, then a stream of incrementa
 
 - Wraps a `*process.Manager`. Once `Start(socketPath)` succeeds, the server installs itself as the manager's `Sink`, so every `tea.Msg` the manager produces is routed through `eventFor` and broadcast as a protocol `Event` to every connected client.
 - Maintains a `clients map[*serverClient]struct{}` under a mutex. Broadcast iterates a snapshot copy of that map so writes never hold the lock during I/O.
+- **Each client owns a send queue and a writer goroutine.** `broadcast` only enqueues, and enqueuing never blocks. This is what keeps one misbehaving client — suspended with `ctrl+z`, or on the far end of a stalled SSH pipe — from stalling the Manager goroutine that produced the event, and from blocking every other client behind it in the broadcast loop.
+- When a client's queue overflows, events are **dropped** and the client is flagged for resync; once it catches up, the writer sends a fresh `EvtSnapshot`. Dropping is safe precisely because of this: whatever was lost, the snapshot makes the client's view authoritative again. Drops are logged to `supervisor.log`.
+- Every socket write carries a `clientWriteTimeout` deadline, so a client that never reads is disconnected rather than pinning a writer goroutine forever.
 - `dispatch` handles incoming requests by looking up the service by name (clients never see indices), then calling the corresponding manager method on a fresh goroutine — never blocking the read loop.
 - `Shutdown` is idempotent. It closes the listener, broadcasts a final `EvtShutdown` event, closes every client conn, and `close()`s the `shutdown` channel so `Done()` waiters return.
 
 ### Client (`control.Client`)
 
-- `Dial` opens the socket, starts a read loop, and blocks until either the initial snapshot arrives, the connection drops, or 5 seconds elapse.
-- The first snapshot allocates `*process.Service` mirrors via `process.NewMirrorService` and builds a `nameToIdx` map. Subsequent snapshots **update fields in place** rather than rebuilding the slice, so pointers held by the TUI stay valid.
-- Each incoming event mutates the mirror service and forwards a translated `tea.Msg` (`StatusMsg`, `LogMsg`, `HealthCheckMsg`) to the TUI's `tea.Program` (installed via `SetProgram` / `SetSink`). The model's `Update` function is identical to the local-manager case.
+- `Dial` opens the socket, starts a read loop, and blocks until either the initial snapshot arrives, the connection drops, or 5 seconds elapse. It is a thin wrapper over `Reconnect`.
+- `Reconnect` re-establishes a dropped connection on the same client. The read loop takes its conn, `done` and `ready` channels **as parameters** rather than reading them off the struct, so a reconnect can never leave an old loop operating on a replaced socket. `Done()` returns the current connection's channel, so callers must re-read it after reconnecting rather than caching it.
+- The first snapshot allocates `*process.Service` mirrors via `process.NewMirrorService` and builds a `nameToIdx` map. Subsequent snapshots **update fields in place** rather than rebuilding the slice, so pointers held by the TUI survive a supervisor restart.
+- Each incoming event mutates the mirror service **through `Service`'s locked mutators** (`ApplyStatus`, `ApplyHealth`, `AppendLog`, `UpdateMirror`) and forwards a translated `tea.Msg` (`StatusMsg`, `LogMsg`, `HealthCheckMsg`) to the TUI's `tea.Program` (installed via `SetProgram` / `SetSink`). The model's `Update` function is identical to the local-manager case.
 - `StopAll()` is a deliberate no-op in client mode (`q` is detach, not stop). `Shutdown()` is the explicit "kill everything" path used by the `d` key and `pairin down`.
+
+## The Fleet Dashboard
+
+`pairin dash` runs `tui.FleetModel` over an `internal/hub.Hub`. The hub is a *client* — nothing about
+the supervisor's ownership model changes, there is still exactly one supervisor per project.
+
+```
+catalog (registered)  +  registry (running)
+            |
+       Hub.Refresh()  -- reconciles the instance SET only, never blocks
+            |
+   one supervise() goroutine per project
+     dial -> hold -> redial with backoff
+            |
+     control.Client per live supervisor
+            |
+   instanceSink tags each event with its InstanceID
+            |
+      hub.Msg{ID, Inner} -> FleetModel.Update
+            |
+      FleetModel renders from Hub.Snapshot() values
+```
+
+Design points that matter:
+
+- **Refresh never blocks.** `control.Dial` waits up to five seconds for a snapshot; a dozen projects
+  dialed in sequence would be a minute of dead air before the first frame. Refresh only adds and
+  removes instances, and each one's supervise goroutine does the dialing.
+- **Rendering is from value snapshots.** `Hub.Snapshot()` returns `[]InstanceView` holding
+  `[]process.ServiceView`. Service views are read *after* releasing the hub lock, because
+  `Service.View` takes its own and holding two is how deadlocks start.
+- **Cells are keyed, not named.** Two projects each having a service called `web` is normal, so
+  `GridCell.Key` carries `instanceID + NUL + service` and selection is tracked by that. Within a
+  single project `Key` is left empty and `Name` serves.
+- **Logs are subscribed, not firehosed.** The hub connects with `LogsNone`. Zooming narrows that one
+  instance to `LogsOnly` for the one service; leaving zoom restores `LogsNone`. The zoomed pane fills
+  its backlog from the on-disk log file, so it isn't empty on arrival.
+- **Quitting is not stopping.** `q` closes the dashboard and touches no supervisor. Stopping is
+  always an explicit key: `x` for a service, `S` for a project.
+- **Starting goes through `internal/launcher`**, the same path the CLI uses. Orphan adoption is
+  automatic there — the CLI can prompt, a dashboard can't, and adopting doesn't destroy work.
+
+## Catalog vs. Registry
+
+Two different lists, deliberately kept apart:
+
+| | Catalog | Instance registry |
+|---|---|---|
+| Question it answers | which projects do I *know about* | which supervisors are *running now* |
+| Location | `$XDG_CONFIG_HOME/pairin/projects.toml` | `$XDG_STATE_HOME/pairin/instances/<hash>.json` |
+| Written by | `pairin register`, and `up` (auto) | the supervisor, on start |
+| Lifetime | curated; survives cleanup; hand-editable | derived; self-cleans when a PID dies |
+
+A third file, `$XDG_STATE_HOME/pairin/ui.json`, remembers interface choices the user makes by
+*using* the TUI rather than by configuring it — currently just the grid's cell style. It sits with
+the state rather than the catalog on that distinction: losing it costs a keystroke, not a setting,
+so every read tolerates a missing or corrupt file by falling back to the default.
+
+The catalog is *config*, which is why it isn't under the state dir: a user should be able to wipe
+`~/.local/state/pairin` without losing their project list, and should be able to keep the file in a
+dotfiles repo.
+
+`resolveConfig` (cmd/root.go) is the single entry point that decides which config a command acts on:
+an explicit `--config` wins, then a catalog lookup on a positional argument, then a search upward
+from the cwd. `pairin`, `up`, `attach` and `down` all route through it.
+
+Lookup order inside `Catalog.Find` is exact name → exact config path → unique name prefix. An
+ambiguous prefix returns `ErrAmbiguous` rather than picking one: starting the wrong project's
+services isn't a mistake the user can undo by pressing ctrl-C.
+
+### The project picker (`a`)
+
+`internal/browse` lists a directory as directories plus `.pairinrc*.toml` files and nothing else —
+it is not a general file browser, because the only reason to be looking is to find a config. Two
+things make browsing bearable rather than tedious, and both cost a `readdir` or a small file read:
+each directory carries a count of the configs inside it, so it's clear which are worth opening; and
+each config carries its `[project].name`, so the choice is made by project rather than by filename.
+Config counts stop after `maxProbes` directories rather than making the user wait on a huge tree.
+
+`ProjectName` deliberately avoids `config.Load`: a config with an invalid service definition should
+still be *listed* with its name, or it becomes impossible to find and fix.
+
+The panel takes the bottom of the screen rather than all of it, so the dashboard being added to stays
+in view. `browserHeight()` sizes it to its contents, capped at half the content area, and `resize()`
+subtracts it from the grid's height — the same fixed-chrome discipline as everywhere else, so nothing
+reflows. While it's open, keys route to `handleBrowseKey`, where `q` closes the picker rather than
+quitting: a mode opened by accident should not be able to quit out from under you.
+
+`Hub.AddProject` loads the config before writing a catalog entry, so an invalid one can't be added
+and then never start. Entries added this way are pinned, since going looking for a project is the
+same deliberate signal `pairin register` carries.
+
+**Catalogue membership and dashboard visibility are different questions**, and the picker has to
+answer the second one. An unpinned, stopped project has a catalog record but is not shown, so the
+picker offers it (marked `unpinned — enter to pin`) rather than refusing it as already added — which
+would tell the user it is in a list they can plainly see it isn't in. Only a *pinned* config is
+refused. `browse.Entry` therefore carries both `Added` and `Pinned`, and `AddProject` pins an
+existing entry rather than treating it as a no-op.
+
+### Pinning
+
+Catalog entries carry an `Auto` flag, and the dashboard shows a stopped project only when it is
+*pinned* (`!Auto`). `pairin register` writes pinned entries; `pairin up`'s auto-registration writes
+unpinned ones. The distinction is between a commitment and a convenience: a project started once to
+check something should not occupy the dashboard forever afterwards.
+
+The field is stored **inverted** — `auto = true` in the file, absence meaning pinned — so entries
+written before pinning existed keep appearing, which is what someone who ran `pairin register`
+deliberately would expect. That's the only reason it isn't called `Pinned`.
+
+The hub filters in `Refresh`: an entry that is neither running nor pinned is dropped from `found`
+before instances are reconciled, so its supervise goroutine is torn down too. `Hub.SetPinned`
+updates the catalog and will *add* an entry for a project that was started by path and never
+registered.
+
+A project with no cells — its config moved or deleted — would otherwise be visible but unselectable,
+and so impossible to unpin. `FleetModel.refresh` gives such a group a single placeholder cell whose
+service name is empty; `selection()` returns it with an empty service, which the service-level
+actions treat as "this is about the project".
+
+Catalog names are slugs (`Slugify`) rather than display names, because real project names look like
+`JJC2 (localdev)` and make poor command-line arguments. Collisions are resolved by qualifying with
+the parent directory before falling back to a counter — several checkouts of one project legitimately
+share a display name. An explicitly chosen name is never overwritten by a later auto-registration.
 
 ## State and Registry
 
@@ -394,18 +553,75 @@ Then:
 +---------------------------------------------------------------+
 ```
 
-**Split view** (default): All panes stacked vertically, height divided evenly.
+**Split view**: All panes stacked vertically, height divided evenly.
+**Grid view**: A compact status cell per service — see below.
 **Focus view** (press 1-9, or `z` to toggle): Single pane fills the screen, scrollable with j/k/arrows.
+
+The initial view is **chosen, not fixed**: if `availableHeight / len(panes)` is below
+`minSplitPaneHeight` (6), the model opens in grid view, because twenty two-line viewports show
+nothing. Pressing `v` sets `viewChosen`, after which resizes leave the choice alone.
+
+Chrome is a **fixed** number of lines — glyph key, header, status, key hints — and the content area
+is padded to fill what remains. Two consequences, both deliberate: the glyph key sits at the top
+where it stays put (below the grid it slid down the screen every time a project gained a row), and a
+status message gets its own line *above* the key hints rather than replacing them, without the rest
+of the screen reflowing to make room.
+
+```
++---------------------------------------------------------------+
+| ● up  ◍ unhealthy  ◐ starting  ⋯ waiting  ⟳ restarting  ...    |  <- glyph key, fixed
+| bigproject   20 services · 18 up            filter: api        |  <- header + tally
+|  ● postgres     ● redis       ● api         ◍ worker           |
+| ›● migrations   ○ mailhog     ✕ scheduler   ⟳ indexer 3/5      |  <- › marks selection
+|  ⋯ reporter     ● gateway                                      |
+|                                                                |  <- padded to fixed height
+| restart scheduler                                              |  <- status (blank when idle)
+| ↑↓←→ move  z zoom  r restart  c clear logs  b cells  q detach  |  <- key hints
++---------------------------------------------------------------+
+```
+
+### Grid (`tui.Grid`)
+
+The grid is shared with the fleet dashboard, which is why it takes *groups* of cells rather than a
+flat list — one group per project there, exactly one here.
+
+Its only stored state is `groups`, `filter`, `width`, `height`, `cellStyle` and a flat `selected`
+index. **Everything else is derived on each render.** Bubble Tea passes `View()` a *copy* of the
+model, so a column count or scroll offset computed during a render would be discarded before the
+next keystroke. `DashboardModel.Update` calls `refreshGrid()` (not `View`) to rebuild cells from
+live service state, for the same reason.
+
+**`Grid.layout()` is the single source of geometry**, and both rendering and navigation read it.
+That is not incidental tidiness — it's a bug fix. The two used to compute geometry independently:
+rendering broke rows at every group boundary, while `Move` did flat arithmetic over a uniform column
+count (`selected + dy*cols`). In the fleet view, pressing down out of a project with fewer services
+than there were columns jumped a full row's worth of cells and skipped whole projects. `layout` now
+produces the visual rows explicitly, including the breaks between groups, so vertical movement steps
+between adjacent *rendered* rows and clamps into short ones. `TestGridMoveDownCrossesGroupBoundary`
+fails against the old arithmetic.
+
+Cell styles (`CellPlain`, `CellBoxed`, `CellCard`, cycled with `b`) change a row's height from one
+screen line to three or four. Navigation is unaffected — a row is one row however tall it draws —
+because `Move` walks `layout.rows` while `window` scrolls by `layout.lineOfCell`, which points at
+the *last* screen line of a row so scrolling brings the whole block into view. Card cells measure
+their detail text as well as their names when sizing columns, since `pid 2995280` is wider than
+`api`.
+
+Selection is tracked by **name**, not index, so it survives filtering — `syncGridSelection` and
+`syncActiveFromGrid` keep `m.active` and the grid pointing at the same service in both directions.
 
 ### Keys
 
 | Key            | Action                                                   |
 |----------------|----------------------------------------------------------|
 | `1`-`9`        | Focus pane N                                             |
-| `z`            | Toggle zoom (split ↔ focus on the active pane)           |
-| `tab` / `S-tab`| Cycle active pane forward / backward                     |
-| `r`            | Restart the active service                               |
-| `↑`/`k`, `↓`/`j` | Scroll the active pane                                 |
+| `v`            | Switch between split and grid                            |
+| `z` / `enter`  | Toggle zoom (split or grid ↔ focus on the selection)     |
+| `esc`          | Leave focus view, or clear the grid filter               |
+| `tab` / `S-tab`| Cycle selection forward / backward                       |
+| `←↑↓→`/`hjkl`  | Move the selection (grid) or scroll (split / focus)      |
+| `/`            | Filter by name (grid only); swallows keys while typing   |
+| `r`            | Restart the selected service                             |
 | `q` / `ctrl+c` | Detach the TUI; supervisor + services keep running       |
 | `d`            | Shut down: stop every service and exit the supervisor    |
 
@@ -522,9 +738,27 @@ Manual restart (`r` key) resets `RestartCount` to 0, giving the service a fresh 
 
 | Lock | Protects | Held by |
 |------|----------|---------|
-| `svc.mu` | `Status`, `PID`, `cmd`, `Branch`, `Logs`, `Healthy`, `generation`, `RestartCount`, `healthCancel` | `startService`, `stopService`, `captureOutput`, `waitForExit`, `healthcheckPoller`, `autoRestartService`, `GetLines` |
+| `svc.mu` | `Status`, `PID`, `cmd`, `Branch`, `Logs`, `Healthy`, `generation`, `RestartCount`, `healthCancel` | `startService`, `stopService`, `captureOutput`, `waitForExit`, `healthcheckPoller`, `autoRestartService`, `GetLines`, `View`, the `Apply*` mirror mutators |
 | `m.mu` (manager) | `m.sink`, `m.err` | `send`, `SetSink`/`SetProgram`, `Error` |
 | `s.mu` (control.Server) | `s.clients`, `s.closed`, `s.ln` | `acceptLoop`, `handle`, `broadcast`, `Shutdown` |
-| `c.mu` (control.Client) | `c.conn`, `c.enc`, `c.sink`, `c.err` | `Dial`, `send`, `readLoop`, `forward`, `SetSink` |
+| `c.mu` (serverClient) | `dropped`, `resync` | `enqueue`, `writeLoop` |
+| `c.wmu` (serverClient) | the JSON encoder | `write` (writer goroutine and `Shutdown`) |
+| `c.mu` (control.Client) | `c.conn`, `c.enc`, `c.done`, `c.sink`, `c.err`, `ProjectName` | `Reconnect`, `send`, `readLoop`, `forward`, `SetSink`, `Done` |
 
-Critical invariant: `svc.mu` is **never held** while waiting for a process to exit or while calling `m.send()` from `captureOutput`. This prevents deadlocks between pipe draining and process shutdown. Similarly, `control.Server.broadcast` releases `s.mu` before writing to any client, so a stuck/slow client can't block the manager's event path.
+**Critical invariant: `svc.mu` is never held across `m.send()`.** The sink on the other end may be a socket broadcaster, and a client that has stopped reading can block that write. Holding the service lock across it would pin the mutex for as long as the client stays wedged, stalling the log tailer, the healthcheck poller and the stop path with it. `startService` and `waitForExit` therefore *collect* their status messages while locked and publish them after unlocking — see `startServiceLocked`, which returns `[]tea.Msg` for exactly this reason. Adding a new `m.send()` call inside a locked region reintroduces the stall.
+
+**Rendering reads value snapshots, never live structs.** `Service.View()` returns a `ServiceView` copy taken under `svc.mu`. The TUI renders from that, because the manager's goroutines (and, on a mirror, the control client's read loop) mutate those fields while a render is in flight. Reading `svc.Status` or `svc.Branch` directly from render code is a data race.
+
+`control.Server.broadcast` releases `s.mu` before touching any client, and only ever enqueues, so a stuck or slow client cannot block the manager's event path.
+
+## Crash Reporting
+
+A panic used to make pairin disappear. In the TUI it was worse than a hard crash: Bubble Tea's built-in handler prints a stack trace to a screen it is simultaneously tearing down, then lets `Run` return a **nil** error — so pairin exited zero and the terminal (or tmux pane) simply closed with nothing recorded.
+
+`internal/crash` fixes that:
+
+- `crash.Guard(context)` is deferred at the top of every long-lived goroutine — the log tailer, `waitForExit`, the healthcheck poller, `autoRestartService`, `watchAdopted`, `persistState`, `StopAll`'s workers, and both sides of the control socket. The goroutine dies; the process survives.
+- Reports go to `$XDG_STATE_HOME/pairin/crash-<timestamp>-<pid>.log` with the version, PID, cwd, context and full stack.
+- The TUI runs with `tea.WithoutCatchPanics()` so pairin's own handler runs instead: it calls `p.Kill()` to restore the terminal, writes a report, and returns an error naming the report path — and says plainly that services are still running, since the alarming reading is the wrong one.
+- `runSupervisor` has the same net at its top level, because a panic there would take every managed service down with it.
+- TUI commands are wrapped in `guarded(...)`, since Bubble Tea runs each command on its own goroutine where an unrecovered panic is fatal to the process.

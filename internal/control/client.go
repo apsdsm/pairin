@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/apsdsm/pairin/internal/crash"
 	"github.com/apsdsm/pairin/internal/process"
 )
 
@@ -20,8 +21,7 @@ import (
 // forwarded to the TUI as the same tea.Msg types the Manager produces, so
 // the TUI's Update loop is unchanged.
 type Client struct {
-	conn net.Conn
-	enc  *json.Encoder
+	socketPath string
 
 	// ProjectName is pulled from the snapshot so the TUI header can render
 	// before the TUI has its own config.
@@ -29,48 +29,89 @@ type Client struct {
 	StartedAt   time.Time
 
 	// Services mirrors the supervisor's services so TUI panes can render
-	// without any round trips. Fields are mutated as events arrive.
+	// without any round trips. The slice itself is built once, from the first
+	// snapshot, and never reallocated — a reconnect updates the existing
+	// structs in place so pointers the TUI holds stay valid.
 	Services  []*process.Service
 	nameToIdx map[string]int
 
 	sink process.Sink // tea.Program, once SetProgram is called
 
-	mu     sync.Mutex
-	ready  chan struct{}
-	closed chan struct{}
-	err    error
+	mu   sync.Mutex
+	conn net.Conn
+	enc  *json.Encoder
+	done chan struct{}
+	err  error
+
+	// Desired log subscription, remembered so it can be re-sent after a
+	// reconnect — subscription is per-connection state on the server, and a
+	// supervisor restart would otherwise silently resume the full firehose.
+	logMode     LogMode
+	logServices []string
 }
+
+// snapshotTimeout bounds how long we wait for a supervisor to describe itself
+// before giving up on a connection attempt.
+const snapshotTimeout = 5 * time.Second
 
 // Dial connects to the supervisor listening at socketPath. It blocks until
 // the initial snapshot has been received so that Services is populated by
 // the time Dial returns.
 func Dial(socketPath string) (*Client, error) {
-	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
-		return nil, fmt.Errorf("dialing %s: %w", socketPath, err)
-	}
 	c := &Client{
-		conn:      conn,
-		enc:       json.NewEncoder(conn),
-		nameToIdx: make(map[string]int),
-		ready:     make(chan struct{}),
-		closed:    make(chan struct{}),
+		socketPath: socketPath,
+		nameToIdx:  make(map[string]int),
+		done:       closedChan(),
 	}
-	go c.readLoop()
+	if err := c.Reconnect(); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
 
-	// Wait for the initial snapshot or an early failure.
-	select {
-	case <-c.ready:
-		return c, nil
-	case <-c.closed:
-		if c.err != nil {
-			return nil, c.err
-		}
-		return nil, errors.New("supervisor closed connection before snapshot")
-	case <-time.After(5 * time.Second):
-		_ = conn.Close()
-		return nil, errors.New("timed out waiting for supervisor snapshot")
+// Reconnect establishes (or re-establishes) the connection to the supervisor
+// and blocks until a snapshot has arrived. The mirrored Services are refreshed
+// in place, so a TUI holding pointers into them survives the round trip.
+//
+// Calling this on a live client replaces the connection; callers are expected
+// to reach here from a disconnect, not to multiplex.
+func (c *Client) Reconnect() error {
+	conn, err := net.Dial("unix", c.socketPath)
+	if err != nil {
+		return fmt.Errorf("dialing %s: %w", c.socketPath, err)
 	}
+
+	ready := make(chan struct{})
+	done := make(chan struct{})
+
+	c.mu.Lock()
+	c.conn = conn
+	c.enc = json.NewEncoder(conn)
+	c.done = done
+	c.err = nil
+	c.mu.Unlock()
+
+	go c.readLoop(conn, done, ready)
+
+	select {
+	case <-ready:
+		c.resendSubscription()
+		return nil
+	case <-done:
+		if err := c.Error(); err != nil {
+			return err
+		}
+		return errors.New("supervisor closed connection before snapshot")
+	case <-time.After(snapshotTimeout):
+		_ = conn.Close()
+		return errors.New("timed out waiting for supervisor snapshot")
+	}
+}
+
+func closedChan() chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
 }
 
 // ServiceList returns the mirrored service list. Satisfies the TUI backend interface.
@@ -116,6 +157,29 @@ func (c *Client) RestartService(idx int) tea.Cmd {
 	}
 }
 
+// RequestRestart asks the supervisor to restart a service by name. Unlike
+// RestartService it isn't tied to the TUI's pane indices, which is what the
+// fleet hub needs — it addresses services across several supervisors at once.
+func (c *Client) RequestRestart(service string) error {
+	return c.send(Request{Kind: ReqRestart, Service: service})
+}
+
+// RequestStop asks the supervisor to stop a service by name.
+func (c *Client) RequestStop(service string) error {
+	return c.send(Request{Kind: ReqStop, Service: service})
+}
+
+// RequestStart asks the supervisor to start a service by name.
+func (c *Client) RequestStart(service string) error {
+	return c.send(Request{Kind: ReqStart, Service: service})
+}
+
+// RequestClearLogs asks the supervisor to discard a service's history. An empty
+// name clears every service in the project.
+func (c *Client) RequestClearLogs(service string) error {
+	return c.send(Request{Kind: ReqClearLogs, Service: service})
+}
+
 // StopAll in client mode does nothing to the services themselves — 'q' in
 // the TUI becomes a detach rather than a shutdown. Use Shutdown for the
 // explicit "kill everything" path.
@@ -126,6 +190,26 @@ func (c *Client) Shutdown() error {
 	return c.send(Request{Kind: ReqShutdown})
 }
 
+// SubscribeLogs narrows (or restores) which services stream their log lines to
+// this client. The choice is remembered across reconnects.
+func (c *Client) SubscribeLogs(mode LogMode, services ...string) error {
+	c.mu.Lock()
+	c.logMode = mode
+	c.logServices = append([]string(nil), services...)
+	c.mu.Unlock()
+	return c.send(Request{Kind: ReqSubscribe, LogMode: mode, Services: services})
+}
+
+func (c *Client) resendSubscription() {
+	c.mu.Lock()
+	mode, services := c.logMode, append([]string(nil), c.logServices...)
+	c.mu.Unlock()
+	if mode == LogsAll && len(services) == 0 {
+		return
+	}
+	_ = c.send(Request{Kind: ReqSubscribe, LogMode: mode, Services: services})
+}
+
 // Error returns the last fatal error seen by the read loop, if any.
 func (c *Client) Error() error {
 	c.mu.Lock()
@@ -133,8 +217,14 @@ func (c *Client) Error() error {
 	return c.err
 }
 
-// Done returns a channel that's closed when the connection is torn down.
-func (c *Client) Done() <-chan struct{} { return c.closed }
+// Done returns a channel that's closed when the current connection is torn
+// down. A Reconnect installs a fresh channel, so callers should re-read this
+// after reconnecting rather than caching the result.
+func (c *Client) Done() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.done
+}
 
 func (c *Client) send(req Request) error {
 	c.mu.Lock()
@@ -146,8 +236,14 @@ func (c *Client) send(req Request) error {
 	return enc.Encode(req)
 }
 
-func (c *Client) readLoop() {
-	dec := json.NewDecoder(c.conn)
+// readLoop decodes events until the connection fails. conn, done and ready are
+// passed in rather than read from the struct so that a reconnect can't leave
+// this loop operating on a channel or socket that has since been replaced.
+func (c *Client) readLoop(conn net.Conn, done, ready chan struct{}) {
+	defer crash.Guard("control: client read loop")
+	defer close(done)
+
+	dec := json.NewDecoder(conn)
 	for {
 		var evt Event
 		if err := dec.Decode(&evt); err != nil {
@@ -156,10 +252,17 @@ func (c *Client) readLoop() {
 				c.err = err
 			}
 			c.mu.Unlock()
-			close(c.closed)
 			return
 		}
 		c.apply(evt)
+
+		if evt.Kind == EvtSnapshot {
+			select {
+			case <-ready:
+			default:
+				close(ready)
+			}
+		}
 	}
 }
 
@@ -172,12 +275,6 @@ func (c *Client) apply(evt Event) {
 			return
 		}
 		c.applySnapshot(*evt.Snapshot)
-		select {
-		case <-c.ready:
-			// already ready; this is a refreshed snapshot
-		default:
-			close(c.ready)
-		}
 	case EvtStatus:
 		if evt.Status == nil {
 			return
@@ -186,14 +283,9 @@ func (c *Client) apply(evt Event) {
 		if !ok {
 			return
 		}
-		svc := c.Services[idx]
-		svc.Status = statusFromString(evt.Status.Status)
-		svc.PID = evt.Status.PID
-		if evt.Status.Branch != "" {
-			svc.Branch = evt.Status.Branch
-		}
-		svc.RestartCount = evt.Status.RestartCount
-		c.forward(process.StatusMsg{Index: idx, Status: svc.Status, PID: svc.PID})
+		status := statusFromString(evt.Status.Status)
+		c.Services[idx].ApplyStatus(status, evt.Status.PID, evt.Status.Branch, evt.Status.RestartCount)
+		c.forward(process.StatusMsg{Index: idx, Status: status, PID: evt.Status.PID})
 	case EvtLog:
 		if evt.Log == nil {
 			return
@@ -202,8 +294,7 @@ func (c *Client) apply(evt Event) {
 		if !ok {
 			return
 		}
-		svc := c.Services[idx]
-		svc.Logs.Add(evt.Log.Line)
+		c.Services[idx].AppendLog(evt.Log.Line)
 		c.forward(process.LogMsg{Index: idx, Line: evt.Log.Line})
 	case EvtHealth:
 		if evt.Health == nil {
@@ -213,17 +304,28 @@ func (c *Client) apply(evt Event) {
 		if !ok {
 			return
 		}
-		svc := c.Services[idx]
-		svc.Healthy = evt.Health.Healthy
+		c.Services[idx].ApplyHealth(evt.Health.Healthy)
 		c.forward(process.HealthCheckMsg{Index: idx, Healthy: evt.Health.Healthy})
+	case EvtLogsCleared:
+		if evt.LogsCleared == nil {
+			return
+		}
+		idx, ok := c.nameToIdx[evt.LogsCleared.Service]
+		if !ok {
+			return
+		}
+		c.Services[idx].ClearLogBuffer()
+		c.forward(process.LogsClearedMsg{Index: idx})
 	case EvtShutdown:
 		// Supervisor is going away; the read loop will see EOF next.
 	}
 }
 
 func (c *Client) applySnapshot(snap Snapshot) {
+	c.mu.Lock()
 	c.ProjectName = snap.ProjectName
 	c.StartedAt = snap.StartedAt
+	c.mu.Unlock()
 
 	if len(c.Services) == 0 {
 		// First snapshot: build mirror services from scratch.
@@ -243,20 +345,23 @@ func (c *Client) applySnapshot(snap Snapshot) {
 		}
 		return
 	}
-	// Later snapshots: update fields in-place so pointers the TUI holds remain valid.
+	// Later snapshots (a resync, or a reconnect): update fields in-place so
+	// pointers the TUI holds remain valid.
 	for _, s := range snap.Services {
 		idx, ok := c.nameToIdx[s.Name]
 		if !ok {
 			continue
 		}
-		svc := c.Services[idx]
-		svc.Status = statusFromString(s.Status)
-		svc.PID = s.PID
-		svc.Branch = s.Branch
-		svc.Healthy = s.Healthy
-		svc.Adopted = s.Adopted
-		svc.LogFile = s.LogFile
-		svc.RestartCount = s.RestartCount
+		c.Services[idx].UpdateMirror(process.ServiceView{
+			Status:       statusFromString(s.Status),
+			PID:          s.PID,
+			Branch:       s.Branch,
+			Healthy:      s.Healthy,
+			Adopted:      s.Adopted,
+			LogFile:      s.LogFile,
+			RestartCount: s.RestartCount,
+		})
+		c.forward(process.StatusMsg{Index: idx, Status: statusFromString(s.Status), PID: s.PID})
 	}
 }
 

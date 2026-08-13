@@ -23,11 +23,18 @@ cmd/
   attach.go                    # `pairin attach`: connect a TUI to an existing supervisor
   down.go                      # `pairin down`: tell the supervisor to stop everything and exit
   ls.go                        # `pairin ls`: list supervisors across the host
+  projects.go                  # `pairin register` / `unregister` / `projects`: the project catalog
   status.go                    # `pairin status`: per-service status across every supervisor
+  dash.go                      # `pairin dash`: host-wide dashboard over a hub
   supervisor.go                # Hidden `pairin supervisor`: the detached background worker
   version.go                   # Version constant + `pairin version`
 internal/
+  browse/browse.go             # Directory listing for the dashboard's project picker
+  catalog/catalog.go           # User's registered projects: $XDG_CONFIG_HOME/pairin/projects.toml
+  hub/hub.go                   # Connections to every supervisor on the host; tagged events, per-instance reconnect
+  launcher/launcher.go         # Spawning detached supervisors; shared by the CLI and the dashboard
   config/config.go             # TOML config loading, dir resolution, dependency/cycle validation
+  crash/crash.go               # Panic capture: Guard for goroutines, reports under $XDG_STATE_HOME/pairin/
   process/manager.go           # Process lifecycle, log capture, healthcheck polling, auto-restart, adoption
   control/
     protocol.go                # NDJSON wire format: Request / Event / Snapshot types
@@ -36,9 +43,12 @@ internal/
   state/
     state.go                   # .pairin/state.json + supervisor.pid lock + IsProcessAlive helpers
     registry.go                # Host-wide registry under $XDG_STATE_HOME/pairin/instances/
+    ui.go                      # Remembered TUI choices (grid cell style) in $XDG_STATE_HOME/pairin/ui.json
     logfile.go                 # Per-service log paths and 10 MiB rotation threshold
   tui/
-    model.go                   # Bubble Tea model: keys, layout, split/focus views; talks to a Backend interface
+    model.go                   # Bubble Tea model: keys, layout, split/grid/focus views; talks to a Backend interface
+    grid.go                    # Compact status grid (groups of cells), shared by the project and fleet models
+    fleet.go                   # `pairin dash` model: every project on the host, over a hub
     pane.go                    # Single service pane: viewport, title bar, log rendering
     tail.go                    # Preload last N lines from on-disk log files when attaching
     styles.go                  # Lipgloss styles and color mapping
@@ -128,6 +138,12 @@ max_restarts = 5
 
 ## Key Design Decisions
 
+- **`svc.mu` is never held across `m.send()`** — the sink may be a socket, and a client that stops reading would otherwise pin the mutex and stall the tailer, healthchecks and the stop path. `startServiceLocked` returns `[]tea.Msg` for the caller to publish after unlocking; do the same for any new send inside a locked region.
+- **`Grid.layout()` is the only source of grid geometry** — rendering and navigation both read it. They once computed it separately and drifted, so vertical movement skipped whole groups
+- **Nothing computed in `View()` may be stored** — Bubble Tea renders from a copy of the model, so grid layout, column counts and scroll offsets are derived on each render; cell data is rebuilt in `Update` via `refreshGrid()`
+- **Render from `Service.View()`, never from live `Service` fields** — those are mutated concurrently by the manager's goroutines and the control client's read loop.
+- Each control-socket client has its own send queue and writer goroutine; `broadcast` only enqueues. On overflow, events are dropped and the client is resynced with a fresh snapshot.
+- Panics are captured (`internal/crash`) rather than allowed to vanish: the TUI runs with `tea.WithoutCatchPanics()` because Bubble Tea's own handler exits zero with no record
 - Process groups (`Setpgid`) ensure child processes of services are also cleaned up on stop
 - SIGINT with 5-second timeout before SIGKILL for graceful shutdown
 - Generation counter on Service prevents stale goroutines from updating state after a restart

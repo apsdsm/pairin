@@ -3,10 +3,11 @@ package cmd
 import (
 	"fmt"
 
+	"github.com/apsdsm/pairin/internal/crash"
 	"github.com/spf13/cobra"
 )
 
-const Version = "0.3.7"
+const Version = "0.4.0"
 
 var versionCmd = &cobra.Command{
 	Use:   "version",
@@ -18,4 +19,7 @@ var versionCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(versionCmd)
+	// Stamp crash reports with the version. Lives here rather than in the crash
+	// package so that package can stay free of a dependency on cmd.
+	crash.Version = Version
 }

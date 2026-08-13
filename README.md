@@ -50,10 +50,15 @@ pairin
 
 | Command                     | Action                                                                       |
 |-----------------------------|------------------------------------------------------------------------------|
+| `pairin dash`               | Dashboard of every project on this host                                      |
 | `pairin` (or `pairin up`)   | Start the supervisor for this project (or attach if one is already running)  |
 | `pairin -d` (or `pairin up -d`) | Start the supervisor in the background and exit without attaching a TUI |
-| `pairin attach`             | Attach a TUI to a supervisor that's already running for this project         |
-| `pairin down`               | Stop all services and the supervisor for this project                        |
+| `pairin up <project>`       | Start a **registered** project by name, from anywhere                        |
+| `pairin attach [project]`   | Attach a TUI to a supervisor that's already running                          |
+| `pairin down [project]`     | Stop all services and the supervisor                                         |
+| `pairin register [path]`    | Add a project to the catalog so it can be started by name                    |
+| `pairin unregister <name>`  | Remove a project from the catalog                                            |
+| `pairin projects`           | List registered projects and whether each is running                         |
 | `pairin ls`                 | List every running pairin supervisor on this host                            |
 | `pairin status`             | Show per-service status across every running supervisor                      |
 | `pairin version`            | Print the version                                                            |
@@ -63,6 +68,171 @@ If a previous supervisor exited without cleaning up, `pairin up` detects the orp
 `-d` / `--detach` is idempotent: if a supervisor is already running for this project, it prints the existing PID and exits without doing anything.
 
 `--clear-logs` (on `pairin` / `pairin up`) deletes the existing service logs in `.pairin/logs/` before starting, so the TUI opens with fresh panes instead of preloading history from previous sessions. It refuses to run while a supervisor is already up — stop it with `pairin down` first.
+
+To clear logs *without* stopping anything, press `c` in either TUI (or `C` in the dashboard for a whole project). That empties the log in place rather than deleting it, which is what makes it safe while the service is running: services write with `O_APPEND`, so after truncation they simply resume from the start of the file. Deleting it instead would leave the service writing to a file nobody can read.
+
+## The Dashboard
+
+`pairin dash` shows every project on the host at once — no tmux required:
+
+```
+● up  ◍ unhealthy  ◐ starting  ⋯ waiting  ⟳ restarting  ✕ crashed  ○ stopped   ◆ pinned  ◇ unpinned
+pairin  5 projects (4 up) · 19 services · 15 running
+
+◆ Acme API  ~/Code/acme-api  sup 2861956  1m
+ ● postgres             ● redis                ● api
+
+◆ Analytics  ~/Code/analytics  stopped — press s to start
+›○ ingest               ○ rollup
+
+◆ JJC2 (localdev)  ~/Code/jjc2_main  sup 2847550  7m
+ ● db                   ● system_api           ● user_web             ● employee_web
+ ● sysadmin_web         ● process_runner       ● docs
+
+◇ Temp Check  /tmp/tempproj  sup 1203880  40s
+ ● probe
+
+restart web in Acme API
+↑↓←→ move  z logs  r restart  x stop  s start  S down  c clear  p pin  b cells  / filter  q quit
+```
+
+The key sits on the first line where it stays put, and the bottom two lines are the last action's
+result and the keys — the result gets its own line rather than replacing them.
+
+Registered projects that aren't running appear greyed out with their service names read from their
+config, so you can see a project's shape before starting it — `s` starts it in place.
+
+### Pinned and unpinned projects
+
+Running projects always appear. Stopped ones appear only if they are **pinned**. A project heading
+leads with `◆` when pinned and `◇` when not, and both are in the key at the top of the screen:
+
+- `pairin register` pins a project. Registering is a deliberate act, so it stays listed.
+- `pairin up` adds an unpinned entry. Starting a project once to check something shouldn't leave a
+  permanent entry behind, so it drops off the dashboard as soon as it stops.
+- `p` in the dashboard toggles pinning, including for projects that were never registered at all.
+
+A project with no services to list — usually one whose config file has been moved or deleted — still
+gets a selectable `(no services)` placeholder, so it can be pinned, started, or unpinned like any
+other. `pairin projects` shows the pin state of everything in the catalog.
+
+### Adding a project from the dashboard
+
+`a` opens a project picker in the bottom half of the screen, leaving the dashboard visible above it:
+
+```
+◆ Acme API  ~/Code/acme-api  sup 2861956  1m
+ ● postgres             ● redis                ● api
+
+── add a project ──────────────────────────────────────────────────────────────
+~/Code
+› ../
+  beholder/
+  jjc2_main/                                                          2 configs
+  jjc_main/                                                            1 config
+  lgc_main/                                                           2 configs
+
+↑↓ move  enter open/add  ← up  esc close
+```
+
+It lists directories and pairin configs, nothing else. The count on the right says how many configs
+each directory holds, so it's clear which are worth opening. Inside a project, configs are labelled
+with their `[project].name` rather than just a filename — which matters when a project keeps
+`.pairinrc.toml` and `.pairinrc.localdev.toml` side by side.
+
+Configs already in the dashboard are marked `already added` and refuse to be added twice. A config
+that's in the catalog but **unpinned** is marked `unpinned — enter to pin` instead: it isn't on
+screen, so adding it pins it and makes it appear.
+
+`enter` on a directory descends, `←` goes up, `enter` on a config adds it (pinned) and closes the
+picker. The directory you were last in is remembered for next time.
+
+### Cell styles
+
+`b` cycles how much room each service gets — densest first:
+
+```
+plain    ›● postgres         ● redis            ⋯ api
+
+boxed    ┏━━━━━━━━━━━━━━┓ ╭──────────────╮ ╭──────────────╮
+         ┃›● postgres   ┃ │ ● redis      │ │ ⋯ api        │
+         ┗━━━━━━━━━━━━━━┛ ╰──────────────╯ ╰──────────────╯
+
+cards    ┏━━━━━━━━━━━━━━┓ ╭──────────────╮ ╭──────────────╮
+         ┃›● postgres   ┃ │ ● redis      │ │ ⋯ api        │
+         ┃   unhealthy  ┃ │   pid 2995280│ │   waits db   │
+         ┗━━━━━━━━━━━━━━┛ ╰──────────────╯ ╰──────────────╯
+```
+
+**plain** fits the most on screen. **boxed** costs three lines per row instead of one. **cards**
+adds a second line carrying what the glyph can't say on its own — PID, which dependency a service is
+waiting on, how many restarts it has left. The selected cell takes a heavy border as well as the
+caret.
+
+Your choice is remembered: whichever style you were last in is the one the next `pairin dash` opens
+in. It's stored in `$XDG_STATE_HOME/pairin/ui.json` (default `~/.local/state/pairin/ui.json`) and
+shared with the per-project grid view, where the same key works.
+
+`z` on any service opens its logs full-screen. Only that one service streams its output while you're
+looking at it; the rest of the host's logs stay off the wire.
+
+`q` closes the dashboard and touches nothing. Stopping is always explicit: `x` for a service, `S` for
+a whole project.
+
+The dashboard re-reads the catalog and the registry every couple of seconds, so projects you start in
+another terminal appear on their own, and supervisors that go away are dropped.
+
+| Key            | Action                                                     |
+|----------------|------------------------------------------------------------|
+| `←↑↓→` / `hjkl`| Move the selection (scroll, when zoomed)                   |
+| `z` / `enter`  | Open the selected service's logs, and back                 |
+| `r`            | Restart the selected service                               |
+| `x`            | Stop the selected service                                  |
+| `s`            | Start the selected service, or the whole project if it's down |
+| `S`            | Shut down the selected project                             |
+| `a`            | Add a project — opens a picker in the bottom of the screen |
+| `p`            | Pin or unpin the selected project (pinned = always listed) |
+| `c` / `C`      | Clear the selected service's logs / the whole project's    |
+| `b`            | Cycle cell style: plain → boxed → cards                    |
+| `/`            | Filter services by name, across every project              |
+| `q` / `ctrl+c` | Close the dashboard (everything keeps running)             |
+
+## The Project Catalog
+
+Rather than cd-ing around to find configs, register your projects once and start them by name from
+anywhere:
+
+```bash
+pairin register                  # register the project in the current directory
+pairin register ~/Code/acme-api  # or one somewhere else
+pairin projects                  # see what's registered, and what's running
+
+pairin up acme-api               # start it, from any directory
+pairin up acme                   # unique prefixes work too
+pairin down acme-api
+```
+
+Running `pairin up` in a project registers it automatically, so the catalog fills itself in as you
+work. Pass `--no-register` to opt out of that for a particular project. Entries added this way are
+**unpinned** — they show in `pairin dash` while running and drop off when stopped, so a project
+started once to check something doesn't clutter the dashboard forever. `pairin register` pins.
+
+Names are slugs derived from the `[project].name` in the config — "Acme API (localdev)" becomes
+`acme-api-localdev` — because display names with spaces and parentheses make poor things to type.
+Override with `pairin register --name <slug>`; a name you chose is never overwritten. Use `--group`
+to label entries for the listing.
+
+A prefix that matches more than one project is refused rather than guessed:
+
+```
+$ pairin up acme
+Error: "acme" matches 2 projects (acme-api-localdev, acme-worker) — be more specific
+```
+
+The catalog lives at `$XDG_CONFIG_HOME/pairin/projects.toml` (default `~/.config/pairin/projects.toml`).
+It's config, not state: it survives a state cleanup, it's safe to hand-edit, and it's reasonable to
+keep in a dotfiles repo. `pairin projects` flags entries whose config file has moved or been deleted
+rather than quietly reporting them as stopped.
 
 ### `-c` / `--config`
 
@@ -136,19 +306,49 @@ max_restarts = 5
 - The title bar shows restart count (e.g. `restarting 3/5` or `restarting #3`)
 - Manual restart (`r` key) resets the restart counter
 
+## Views
+
+pairin has three views:
+
+- **split** — every service gets a log pane, stacked. The default for a handful of services.
+- **grid** — a compact status grid, one cell per service. Built for configs too big to give
+  everything a readable pane.
+- **focus** — one service's logs, full screen.
+
+`v` switches between split and grid; `z` (or `enter`) zooms the selected service to full screen and
+back. If there are so many services that each pane would be under 6 lines tall, pairin **starts in
+grid view on its own** — twenty two-line viewports show nothing useful. Pressing `v` takes the choice
+back, and pairin stops second-guessing it on resize.
+
+In grid view each cell carries a status glyph: `●` up, `◍` running but failing its healthcheck,
+`◐` starting, `⋯` waiting on a dependency, `⟳` restarting, `✕` crashed, `○` stopped.
+
 ## Keyboard Shortcuts
 
-| Key          | Action                                                       |
-|--------------|--------------------------------------------------------------|
-| `1`-`9`      | Focus a service pane full-screen                             |
-| `z`          | Toggle zoom (split view ↔ focus on the active pane)          |
-| `tab`        | Cycle active pane forward                                    |
-| `shift+tab`  | Cycle active pane backward                                   |
-| `r`          | Restart the active service                                   |
-| `up` / `k`   | Scroll up                                                    |
-| `down` / `j` | Scroll down                                                  |
+| Key            | Action                                                     |
+|----------------|------------------------------------------------------------|
+| `1`-`9`        | Focus a service pane full-screen                           |
+| `v`            | Switch between split and grid view                         |
+| `z` / `enter`  | Zoom the selected service full-screen, and back            |
+| `esc`          | Leave focus view, or clear the grid filter                 |
+| `tab`          | Cycle selection forward                                    |
+| `shift+tab`    | Cycle selection backward                                   |
+| `←↑↓→` / `hjkl`| Move the selection (grid) or scroll logs (split / focus)   |
+| `/`            | Filter services by name (grid view)                        |
+| `b`            | Cycle cell style: plain → boxed → cards (grid view)        |
+| `r`            | Restart the selected service                               |
+| `c`            | Clear the selected service's logs                          |
 | `q` / `ctrl+c` | Detach the TUI (services and supervisor keep running)      |
-| `d`          | Shut down: stop every service and exit the supervisor        |
+| `d`            | Shut down: stop every service and exit the supervisor      |
+
+## When Something Goes Wrong
+
+If pairin itself crashes, it writes a report to `$XDG_STATE_HOME/pairin/crash-<timestamp>-<pid>.log`
+(default `~/.local/state/pairin/`) naming the goroutine and the stack. A TUI crash leaves your
+services running — reattach with `pairin attach`.
+
+If the supervisor goes away while a TUI is attached, the TUI stays up, shows a reconnect banner, and
+reattaches by itself once the supervisor is back.
 
 ## How It Works
 

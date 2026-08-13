@@ -19,17 +19,40 @@ import (
 type RequestKind string
 
 const (
-	ReqSnapshot RequestKind = "snapshot"
-	ReqRestart  RequestKind = "restart"
-	ReqStop     RequestKind = "stop"
-	ReqStart    RequestKind = "start"
-	ReqShutdown RequestKind = "shutdown"
+	ReqSnapshot  RequestKind = "snapshot"
+	ReqRestart   RequestKind = "restart"
+	ReqStop      RequestKind = "stop"
+	ReqStart     RequestKind = "start"
+	ReqShutdown  RequestKind = "shutdown"
+	ReqSubscribe RequestKind = "subscribe"
+	// ReqClearLogs discards a service's history. An empty Service clears every
+	// service in the project.
+	ReqClearLogs RequestKind = "clear_logs"
+)
+
+// LogMode controls which log lines a client wants streamed to it.
+//
+// The zero value means "all", so a client that never subscribes behaves exactly
+// as it did before this existed. The fleet dashboard subscribes to none while
+// it's showing a grid of service names — with a socket open per project it
+// would otherwise pull every log line on the host to render text it isn't
+// displaying — and narrows to a single service when zooming into its logs.
+type LogMode string
+
+const (
+	LogsAll  LogMode = ""     // every service (default)
+	LogsNone LogMode = "none" // status and health only
+	LogsOnly LogMode = "only" // just the named services
 )
 
 // Request is the envelope for all client-to-supervisor messages.
 type Request struct {
 	Kind    RequestKind `json:"kind"`
 	Service string      `json:"service,omitempty"`
+
+	// Subscribe only.
+	LogMode  LogMode  `json:"log_mode,omitempty"`
+	Services []string `json:"services,omitempty"`
 }
 
 // ----- Supervisor -> Client events -----
@@ -43,6 +66,8 @@ const (
 	EvtLog      EventKind = "log"
 	EvtHealth   EventKind = "health"
 	EvtShutdown EventKind = "shutdown"
+	// EvtLogsCleared tells clients to drop their copy of a service's history.
+	EvtLogsCleared EventKind = "logs_cleared"
 )
 
 // Event is the envelope for all supervisor-to-client messages.
@@ -61,6 +86,14 @@ type Event struct {
 
 	// Health: one service's healthcheck flipped.
 	Health *HealthEvent `json:"health,omitempty"`
+
+	// LogsCleared: one service's history was discarded.
+	LogsCleared *LogsClearedEvent `json:"logs_cleared,omitempty"`
+}
+
+// LogsClearedEvent is sent after a service's log has been emptied.
+type LogsClearedEvent struct {
+	Service string `json:"service"`
 }
 
 // Snapshot is a point-in-time description of the supervised world.

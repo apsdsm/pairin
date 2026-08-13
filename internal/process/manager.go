@@ -17,6 +17,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/apsdsm/pairin/internal/config"
+	"github.com/apsdsm/pairin/internal/crash"
 	"github.com/apsdsm/pairin/internal/state"
 )
 
@@ -73,6 +74,12 @@ func (rb *RingBuffer) Add(line string) {
 	}
 }
 
+// Reset empties the buffer.
+func (rb *RingBuffer) Reset() {
+	rb.head = 0
+	rb.count = 0
+}
+
 func (rb *RingBuffer) Lines() []string {
 	if rb.count == 0 {
 		return nil
@@ -117,6 +124,103 @@ func (s *Service) GetLines() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.Logs.Lines()
+}
+
+// ServiceView is an immutable value copy of everything a renderer needs from a
+// Service. Rendering reads a view rather than the live struct: the fields below
+// are mutated by the manager's goroutines (or, on a mirror, by the control
+// client's read loop) while the TUI is drawing, and sharing the struct across
+// that boundary is a data race no amount of locking at one end can fix.
+type ServiceView struct {
+	Name         string
+	Short        string
+	Color        string
+	Dir          string
+	Cmd          string
+	Branch       string
+	Status       Status
+	PID          int
+	Healthy      bool
+	HasHealth    bool
+	Adopted      bool
+	LogFile      string
+	RestartCount int
+	MaxRestarts  int
+	DependsOn    []string
+}
+
+// View takes a consistent snapshot of the service's display state.
+func (s *Service) View() ServiceView {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return ServiceView{
+		Name:         s.Config.Name,
+		Short:        s.Config.Short,
+		Color:        s.Config.Color,
+		Dir:          s.Config.Dir,
+		Cmd:          s.Config.Cmd,
+		Branch:       s.Branch,
+		Status:       s.Status,
+		PID:          s.PID,
+		Healthy:      s.Healthy,
+		HasHealth:    s.Config.Healthcheck != "",
+		Adopted:      s.Adopted,
+		LogFile:      s.LogFile,
+		RestartCount: s.RestartCount,
+		MaxRestarts:  s.Config.MaxRestarts,
+		DependsOn:    s.Config.DependsOn,
+	}
+}
+
+// ApplyStatus records a status transition on a mirror service and returns the
+// resulting state. Used by the control client, which receives these from the
+// supervisor rather than observing them directly.
+func (s *Service) ApplyStatus(status Status, pid int, branch string, restartCount int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Status = status
+	s.PID = pid
+	if branch != "" {
+		s.Branch = branch
+	}
+	s.RestartCount = restartCount
+}
+
+// ApplyHealth records a healthcheck result on a mirror service.
+func (s *Service) ApplyHealth(healthy bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Healthy = healthy
+}
+
+// AppendLog adds a line to a mirror service's ring buffer.
+func (s *Service) AppendLog(line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Logs.Add(line)
+}
+
+// ClearLogBuffer empties the in-memory history.
+func (s *Service) ClearLogBuffer() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Logs.Reset()
+}
+
+// UpdateMirror applies a fresh remote snapshot to a mirror service. Only the
+// runtime fields are touched — the config half of a mirror is fixed at
+// construction, so a reconnect can refresh state without invalidating the
+// pointers the TUI is holding.
+func (s *Service) UpdateMirror(v ServiceView) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Status = v.Status
+	s.PID = v.PID
+	s.Branch = v.Branch
+	s.Healthy = v.Healthy
+	s.Adopted = v.Adopted
+	s.LogFile = v.LogFile
+	s.RestartCount = v.RestartCount
 }
 
 // NewMirrorService creates a Service stub for client-side use. It has no
@@ -267,6 +371,33 @@ func (m *Manager) StartAll() tea.Cmd {
 	}
 }
 
+// ClearLogs discards a service's history — the on-disk log and the in-memory
+// ring buffer both. An empty name clears every service in the project.
+//
+// This is the running-supervisor counterpart to `pairin --clear-logs`, which
+// deletes the files outright and so can only be used before one starts.
+func (m *Manager) ClearLogs(name string) {
+	for idx, svc := range m.Services {
+		if name != "" && svc.Config.Name != name {
+			continue
+		}
+
+		svc.mu.Lock()
+		svc.Logs.Reset()
+		logFile := svc.LogFile
+		svc.mu.Unlock()
+
+		if logFile != "" {
+			if err := state.TruncateLog(logFile); err != nil {
+				svc.mu.Lock()
+				svc.Logs.Add(fmt.Sprintf("[pairin] could not clear log: %v", err))
+				svc.mu.Unlock()
+			}
+		}
+		m.send(LogsClearedMsg{Index: idx})
+	}
+}
+
 // AdoptService registers an orphaned process (from a previous pairin) as a
 // live service. No exec.Cmd is created; liveness is polled, stop works via
 // PGID signal, restart is not supported in phase 1.
@@ -300,6 +431,8 @@ func (m *Manager) AdoptService(idx int, pid, pgid int, logFile string) {
 // watchAdopted polls an adopted process's liveness. When it disappears, the
 // service is marked Stopped (we can't know the exit code from outside).
 func (m *Manager) watchAdopted(idx, pid, gen int) {
+	defer crash.Guard(fmt.Sprintf("watchAdopted: %s", m.Services[idx].Config.Name))
+
 	svc := m.Services[idx]
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -340,6 +473,8 @@ func (m *Manager) watchAdopted(idx, pid, gen int) {
 // persistState writes the current running-services snapshot to state.json.
 // Safe to call from any goroutine; serialized by its own write mutex.
 func (m *Manager) persistState() {
+	defer crash.Guard("persistState")
+
 	if m.configPath == "" {
 		return
 	}
@@ -369,10 +504,27 @@ func (m *Manager) persistState() {
 	_ = state.Save(m.configPath, snap)
 }
 
+// startService launches a service and publishes the resulting status changes.
+//
+// The publishing deliberately happens after svc.mu has been released: m.send
+// reaches a Sink that may be a socket broadcaster, and a client that has
+// stopped reading can block that write. Holding the service lock across it
+// would pin the mutex for as long as the client stays wedged, stalling the
+// log tailer, the healthcheck poller and the stop path along with it.
 func (m *Manager) startService(idx int) {
+	for _, msg := range m.startServiceLocked(idx) {
+		m.send(msg)
+	}
+}
+
+// startServiceLocked does the work and returns the messages to publish once
+// the caller has released svc.mu.
+func (m *Manager) startServiceLocked(idx int) []tea.Msg {
 	svc := m.Services[idx]
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
+
+	var pending []tea.Msg
 
 	svc.generation++
 	svc.Adopted = false
@@ -381,7 +533,7 @@ func (m *Manager) startService(idx int) {
 	svc.Branch = detectBranch(svc.Config.Dir)
 
 	svc.Status = StatusStarting
-	m.send(StatusMsg{Index: idx, Status: StatusStarting})
+	pending = append(pending, StatusMsg{Index: idx, Status: StatusStarting})
 
 	// Rotate the log file if it's grown past the threshold since last session.
 	// Rotation at-start only: the child owns the fd, so mid-session rotation
@@ -393,8 +545,7 @@ func (m *Manager) startService(idx int) {
 	if err := os.MkdirAll(state.LogsDir(m.configPath), 0o755); err != nil {
 		svc.Status = StatusCrashed
 		svc.Logs.Add(fmt.Sprintf("[pairin] failed to create logs dir: %v", err))
-		m.send(StatusMsg{Index: idx, Status: StatusCrashed})
-		return
+		return append(pending, StatusMsg{Index: idx, Status: StatusCrashed})
 	}
 
 	// Open the log file for the child to write to. O_APPEND is belt-and-suspenders:
@@ -404,8 +555,7 @@ func (m *Manager) startService(idx int) {
 	if err != nil {
 		svc.Status = StatusCrashed
 		svc.Logs.Add(fmt.Sprintf("[pairin] failed to open log file: %v", err))
-		m.send(StatusMsg{Index: idx, Status: StatusCrashed})
-		return
+		return append(pending, StatusMsg{Index: idx, Status: StatusCrashed})
 	}
 
 	// Session marker so adopted/tailed logs are readable across pairin restarts.
@@ -421,8 +571,7 @@ func (m *Manager) startService(idx int) {
 		logF.Close()
 		svc.Status = StatusCrashed
 		svc.Logs.Add(fmt.Sprintf("[pairin] failed to start: %v", err))
-		m.send(StatusMsg{Index: idx, Status: StatusCrashed})
-		return
+		return append(pending, StatusMsg{Index: idx, Status: StatusCrashed})
 	}
 
 	// Child has its own dup of the fd; pairin's copy is no longer needed.
@@ -436,7 +585,7 @@ func (m *Manager) startService(idx int) {
 		svc.PGID = svc.PID
 	}
 	svc.Status = StatusRunning
-	m.send(StatusMsg{Index: idx, Status: StatusRunning, PID: svc.PID})
+	pending = append(pending, StatusMsg{Index: idx, Status: StatusRunning, PID: svc.PID})
 
 	// Tail the log file in background to feed the TUI.
 	m.startTailer(idx)
@@ -452,6 +601,8 @@ func (m *Manager) startService(idx int) {
 
 	// Persist the updated state outside the lock.
 	go m.persistState()
+
+	return pending
 }
 
 // startTailer launches a goroutine that polls the service's log file for new
@@ -478,6 +629,8 @@ func (m *Manager) startTailer(idx int) {
 // appears. It tolerates the file not yet existing and detects rotation (inode
 // change or truncation) by reopening.
 func (m *Manager) tailFile(ctx context.Context, idx int, path string) {
+	defer crash.Guard(fmt.Sprintf("tailFile: %s", m.Services[idx].Config.Name))
+
 	var (
 		f        *os.File
 		lastIno  uint64
@@ -586,6 +739,8 @@ func (m *Manager) emitLine(idx int, line string) {
 }
 
 func (m *Manager) waitForExit(idx int, cmd *exec.Cmd, gen int) {
+	defer crash.Guard(fmt.Sprintf("waitForExit: %s", m.Services[idx].Config.Name))
+
 	svc := m.Services[idx]
 
 	err := cmd.Wait()
@@ -598,6 +753,9 @@ func (m *Manager) waitForExit(idx int, cmd *exec.Cmd, gen int) {
 		return
 	}
 
+	// Status changes are published after the lock is released — see startService.
+	var pending []tea.Msg
+
 	var exitedWithFailure bool
 	if err != nil {
 		exitedWithFailure = true
@@ -605,14 +763,14 @@ func (m *Manager) waitForExit(idx int, cmd *exec.Cmd, gen int) {
 		if svc.Status == StatusRunning {
 			svc.Status = StatusCrashed
 			svc.Logs.Add(fmt.Sprintf("[pairin] process exited: %v", err))
-			m.send(StatusMsg{Index: idx, Status: StatusCrashed})
+			pending = append(pending, StatusMsg{Index: idx, Status: StatusCrashed})
 		}
 	} else {
 		exitedWithFailure = false
 		if svc.Status == StatusRunning {
 			svc.Status = StatusStopped
 			svc.Logs.Add("[pairin] process exited normally")
-			m.send(StatusMsg{Index: idx, Status: StatusStopped})
+			pending = append(pending, StatusMsg{Index: idx, Status: StatusStopped})
 		}
 	}
 
@@ -622,6 +780,10 @@ func (m *Manager) waitForExit(idx int, cmd *exec.Cmd, gen int) {
 	svc.PGID = 0
 	svc.cmd = nil
 	svc.mu.Unlock()
+
+	for _, msg := range pending {
+		m.send(msg)
+	}
 
 	go m.persistState()
 
@@ -664,6 +826,8 @@ func (m *Manager) shouldAutoRestart(svc *Service, exitedWithFailure bool) bool {
 // autoRestartService handles the auto-restart flow: sets status to restarting,
 // waits for the cooldown delay, then restarts the service.
 func (m *Manager) autoRestartService(idx int, originalGen int) {
+	defer crash.Guard(fmt.Sprintf("autoRestart: %s", m.Services[idx].Config.Name))
+
 	if m.quitting.Load() {
 		return
 	}
@@ -779,6 +943,8 @@ func (m *Manager) stopService(idx int) {
 
 	done := make(chan struct{})
 	go func() {
+		defer crash.Guard("stopService: reap")
+
 		if cmd != nil && cmd.Process != nil {
 			cmd.Process.Wait()
 		} else if pid != 0 {
@@ -831,11 +997,14 @@ func (m *Manager) StopAll() {
 
 	done := make(chan struct{})
 	go func() {
+		defer crash.Guard("stopAll")
+
 		var wg sync.WaitGroup
 		for i := range m.Services {
 			wg.Add(1)
 			go func(idx int) {
 				defer wg.Done()
+				defer crash.Guard("stopAll: service")
 				m.stopService(idx)
 			}(i)
 		}
@@ -893,6 +1062,12 @@ type HealthCheckMsg struct {
 	Healthy bool
 }
 
+// LogsClearedMsg reports that a service's history has been discarded, so any
+// view holding a copy of it should drop that too.
+type LogsClearedMsg struct {
+	Index int
+}
+
 // checkTCP dials a TCP address with a 1-second timeout.
 func checkTCP(addr string) bool {
 	conn, err := net.DialTimeout("tcp", addr, 1*time.Second)
@@ -938,6 +1113,8 @@ func (m *Manager) startHealthcheckPoller(idx int) {
 	hc := svc.Config.Healthcheck
 
 	go func() {
+		defer crash.Guard(fmt.Sprintf("healthcheck: %s", m.Services[idx].Config.Name))
+
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 
