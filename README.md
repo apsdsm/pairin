@@ -2,11 +2,9 @@
 
 A terminal dashboard for running multiple local development services in parallel.
 
-pairin reads a `.pairinrc.toml` config file from the current directory (or any parent directory), spawns a detached supervisor that runs all defined services, and attaches a split-pane TUI to it. The TUI can be detached and reattached without restarting the services.
+<img width="600" height="362" alt="pairin-screenshot-01" src="https://github.com/user-attachments/assets/6b82c149-1f96-4ad5-b9bb-8afd4ab51c52" />
 
-<p align="center">
-  <img src="pairin.jpeg" alt="pairin" width="400">
-</p>
+pairin reads a `.pairinrc.toml` config file from the current directory (or any parent directory), spawns a detached supervisor that runs all defined services, and attaches a split-pane TUI to it. The TUI can be detached and reattached without restarting the services.
 
 ## Install
 
@@ -295,7 +293,7 @@ reattaches by itself once the supervisor is back.
 
 ## How It Works
 
-- Running `pairin` spawns a detached supervisor process (its own session leader) and attaches a TUI client to it over a unix socket at `.pairin/control.sock`. Closing the TUI with `q` leaves the supervisor and its services running;<img width="600" height="362" alt="pairin-screenshot-01" src="https://github.com/user-attachments/assets/6b82c149-1f96-4ad5-b9bb-8afd4ab51c52" />
+- Running `pairin` spawns a detached supervisor process (its own session leader) and attaches a TUI client to it over a unix socket at `.pairin/control.sock`. Closing the TUI with `q` leaves the supervisor and its services running.
  reattach later with `pairin` or `pairin attach`. Use `d` (or `pairin down`) to stop everything.
 - Each service runs as a subprocess in its own process group, so the supervisor can clean up child processes on stop.
 - Per-service stdout and stderr are merged into both an in-memory ring buffer (1000 lines, used by the TUI) and a rotating log file at `.pairin/logs/<service>.log` (rotated to `.log.1` once it exceeds 10 MiB).
@@ -306,3 +304,8 @@ reattaches by itself once the supervisor is back.
 ## Uses
 
 - [Bubble Tea](https://github.com/charmbracelet/bubbletea).
+
+<p align="center">
+  <img src="pairin.jpeg" alt="pairin" width="400">
+</p>
+
