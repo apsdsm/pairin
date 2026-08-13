@@ -351,3 +351,98 @@ func TestFleetCellStyles(t *testing.T) {
 		}
 	}
 }
+
+// The glyph key belongs on the first line, where it stays put. Below the grid
+// it slid down the screen every time a project gained a row.
+func TestFleetLegendIsTheFirstLine(t *testing.T) {
+	m, _ := newFleet(t, 100, 30, func(root string) {
+		fleetProject(t, root, "alpha", "web", "worker")
+	})
+
+	first := strings.Split(m.View(), "\n")[0]
+	if !strings.Contains(first, "up") || !strings.Contains(first, "crashed") {
+		t.Errorf("first line is not the glyph key: %q", first)
+	}
+}
+
+// A status message must not take the key hints off screen — it gets its own
+// line above them.
+func TestFleetStatusDoesNotHideTheKeys(t *testing.T) {
+	m, _ := newFleet(t, 100, 30, func(root string) {
+		fleetProject(t, root, "alpha", "web")
+	})
+
+	quiet := strings.Split(m.View(), "\n")
+	m = sendFleet(m, key("r")) // produces a status line
+	if m.status == "" {
+		t.Fatal("restart produced no status message")
+	}
+
+	noisy := strings.Split(m.View(), "\n")
+
+	// Same overall height: nothing reflowed to make room.
+	if len(noisy) != len(quiet) {
+		t.Errorf("view changed height with a status showing: %d -> %d", len(quiet), len(noisy))
+	}
+	// Keys still on the last line.
+	if !strings.Contains(noisy[len(noisy)-1], "q quit") {
+		t.Errorf("key hints missing from the last line: %q", noisy[len(noisy)-1])
+	}
+	// Status on the line above it.
+	if !strings.Contains(noisy[len(noisy)-2], m.status) {
+		t.Errorf("status not on the line above the keys: %q", noisy[len(noisy)-2])
+	}
+}
+
+// "c" clears the selected service's logs, through to the file on disk.
+//
+// The assertion is that the log shrinks, not that it is momentarily empty: the
+// service keeps writing, so a poll looking for exactly zero bytes is racing a
+// process that appends several times a second.
+func TestFleetClearLogs(t *testing.T) {
+	m, h := newFleet(t, 100, 30, func(root string) {
+		fleetProject(t, root, "alpha", "web")
+	})
+
+	inst, service, ok := m.selection()
+	if !ok {
+		t.Fatal("nothing selected")
+	}
+
+	var logFile string
+	for _, svc := range h.Services(inst.ID) {
+		if v := svc.View(); v.Name == service {
+			logFile = v.LogFile
+		}
+	}
+	if logFile == "" {
+		t.Fatal("could not find the service's log file")
+	}
+
+	// Let it accumulate enough output that a truncation is unmistakable.
+	var before int64
+	for i := 0; i < 200; i++ {
+		if info, err := os.Stat(logFile); err == nil && info.Size() > 200 {
+			before = info.Size()
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if before == 0 {
+		t.Fatal("service produced no output to clear")
+	}
+
+	m = sendFleet(m, key("c"))
+	if m.statusErr {
+		t.Fatalf("clear reported an error: %s", m.status)
+	}
+
+	// The supervisor handles the request on its own goroutine.
+	for i := 0; i < 200; i++ {
+		if info, err := os.Stat(logFile); err == nil && info.Size() < before {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Errorf("log file never shrank below %d bytes", before)
+}

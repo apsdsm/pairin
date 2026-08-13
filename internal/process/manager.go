@@ -74,6 +74,12 @@ func (rb *RingBuffer) Add(line string) {
 	}
 }
 
+// Reset empties the buffer.
+func (rb *RingBuffer) Reset() {
+	rb.head = 0
+	rb.count = 0
+}
+
 func (rb *RingBuffer) Lines() []string {
 	if rb.count == 0 {
 		return nil
@@ -192,6 +198,13 @@ func (s *Service) AppendLog(line string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Logs.Add(line)
+}
+
+// ClearLogBuffer empties the in-memory history.
+func (s *Service) ClearLogBuffer() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Logs.Reset()
 }
 
 // UpdateMirror applies a fresh remote snapshot to a mirror service. Only the
@@ -355,6 +368,33 @@ func (m *Manager) StartAll() tea.Cmd {
 			}
 		}
 		return AllStartedMsg{}
+	}
+}
+
+// ClearLogs discards a service's history — the on-disk log and the in-memory
+// ring buffer both. An empty name clears every service in the project.
+//
+// This is the running-supervisor counterpart to `pairin --clear-logs`, which
+// deletes the files outright and so can only be used before one starts.
+func (m *Manager) ClearLogs(name string) {
+	for idx, svc := range m.Services {
+		if name != "" && svc.Config.Name != name {
+			continue
+		}
+
+		svc.mu.Lock()
+		svc.Logs.Reset()
+		logFile := svc.LogFile
+		svc.mu.Unlock()
+
+		if logFile != "" {
+			if err := state.TruncateLog(logFile); err != nil {
+				svc.mu.Lock()
+				svc.Logs.Add(fmt.Sprintf("[pairin] could not clear log: %v", err))
+				svc.mu.Unlock()
+			}
+		}
+		m.send(LogsClearedMsg{Index: idx})
 	}
 }
 
@@ -1020,6 +1060,12 @@ type ServiceRestartedMsg struct {
 type HealthCheckMsg struct {
 	Index   int
 	Healthy bool
+}
+
+// LogsClearedMsg reports that a service's history has been discarded, so any
+// view holding a copy of it should drop that too.
+type LogsClearedMsg struct {
+	Index int
 }
 
 // checkTCP dials a TCP address with a 1-second timeout.

@@ -136,6 +136,13 @@ func (s *Server) eventFor(msg tea.Msg) (Event, bool) {
 			Service: s.mgr.Services[m.Index].Config.Name,
 			Healthy: m.Healthy,
 		}}, true
+	case process.LogsClearedMsg:
+		if m.Index < 0 || m.Index >= len(s.mgr.Services) {
+			return Event{}, false
+		}
+		return Event{Kind: EvtLogsCleared, LogsCleared: &LogsClearedEvent{
+			Service: s.mgr.Services[m.Index].Config.Name,
+		}}, true
 	}
 	// AllStartedMsg / ServiceRestartedMsg are TUI-internal; drop them.
 	return Event{}, false
@@ -226,6 +233,9 @@ func (s *Server) dispatch(req Request) {
 		if idx, ok := s.serviceIndex(req.Service); ok {
 			go s.mgr.StartService(idx)
 		}
+	case ReqClearLogs:
+		// An empty service name clears the whole project.
+		go s.mgr.ClearLogs(req.Service)
 	case ReqShutdown:
 		go func() {
 			s.mgr.StopAll()

@@ -25,6 +25,9 @@ const (
 	ReqStart     RequestKind = "start"
 	ReqShutdown  RequestKind = "shutdown"
 	ReqSubscribe RequestKind = "subscribe"
+	// ReqClearLogs discards a service's history. An empty Service clears every
+	// service in the project.
+	ReqClearLogs RequestKind = "clear_logs"
 )
 
 // LogMode controls which log lines a client wants streamed to it.
@@ -63,6 +66,8 @@ const (
 	EvtLog      EventKind = "log"
 	EvtHealth   EventKind = "health"
 	EvtShutdown EventKind = "shutdown"
+	// EvtLogsCleared tells clients to drop their copy of a service's history.
+	EvtLogsCleared EventKind = "logs_cleared"
 )
 
 // Event is the envelope for all supervisor-to-client messages.
@@ -81,6 +86,14 @@ type Event struct {
 
 	// Health: one service's healthcheck flipped.
 	Health *HealthEvent `json:"health,omitempty"`
+
+	// LogsCleared: one service's history was discarded.
+	LogsCleared *LogsClearedEvent `json:"logs_cleared,omitempty"`
+}
+
+// LogsClearedEvent is sent after a service's log has been emptied.
+type LogsClearedEvent struct {
+	Service string `json:"service"`
 }
 
 // Snapshot is a point-in-time description of the supervised world.

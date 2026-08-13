@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/apsdsm/pairin/internal/config"
+	"github.com/apsdsm/pairin/internal/state"
 )
 
 // ---------------------------------------------------------------------------
@@ -1205,5 +1207,97 @@ func TestAutoRestart_QuittingFlagDuringDelay(t *testing.T) {
 	// the actual restart from happening after the delay completes
 	if restartCount > 1 {
 		t.Errorf("expected at most 1 restart count, got %d", restartCount)
+	}
+}
+
+// ClearLogs is the running-supervisor counterpart to `pairin --clear-logs`.
+// It truncates rather than unlinks, because the service holds an open fd and
+// would otherwise keep writing to an inode nobody can read.
+func TestClearLogs(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Project:  config.Project{Name: "test"},
+		Services: []config.Service{{Name: "alpha", Cmd: "true"}, {Name: "beta", Cmd: "true"}},
+		Path:     filepath.Join(dir, ".pairinrc.toml"),
+	}
+	mgr := NewManager(cfg)
+
+	if err := state.EnsureDirs(cfg.Path); err != nil {
+		t.Fatalf("state dirs: %v", err)
+	}
+	for _, svc := range mgr.Services {
+		if err := os.WriteFile(svc.LogFile, []byte("old line\nanother\n"), 0o644); err != nil {
+			t.Fatalf("seeding log: %v", err)
+		}
+		if err := os.WriteFile(svc.LogFile+".1", []byte("rotated\n"), 0o644); err != nil {
+			t.Fatalf("seeding rotated log: %v", err)
+		}
+		svc.Logs.Add("buffered line")
+	}
+
+	// Clearing one service leaves the other alone.
+	mgr.ClearLogs("alpha")
+
+	alpha, beta := mgr.Services[0], mgr.Services[1]
+
+	if info, err := os.Stat(alpha.LogFile); err != nil {
+		t.Errorf("alpha's log was removed rather than truncated: %v", err)
+	} else if info.Size() != 0 {
+		t.Errorf("alpha's log is %d bytes, want 0", info.Size())
+	}
+	if _, err := os.Stat(alpha.LogFile + ".1"); !os.IsNotExist(err) {
+		t.Errorf("alpha's rotated log survived: %v", err)
+	}
+	if got := alpha.GetLines(); len(got) != 0 {
+		t.Errorf("alpha's ring buffer still holds %v", got)
+	}
+
+	if info, err := os.Stat(beta.LogFile); err != nil || info.Size() == 0 {
+		t.Errorf("beta's log was cleared too")
+	}
+	if got := beta.GetLines(); len(got) != 1 {
+		t.Errorf("beta's ring buffer = %v, want its one line", got)
+	}
+
+	// An empty name clears everything.
+	mgr.ClearLogs("")
+	if info, err := os.Stat(beta.LogFile); err != nil || info.Size() != 0 {
+		t.Errorf("clearing all did not empty beta's log")
+	}
+	if got := beta.GetLines(); len(got) != 0 {
+		t.Errorf("clearing all left beta's buffer holding %v", got)
+	}
+}
+
+// A truncated log must still be appended to correctly. Services are started
+// with O_APPEND, so writes resume from zero rather than leaving a sparse gap
+// where the old contents were.
+func TestClearLogsKeepsAppendWritesContiguous(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "svc.log")
+
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString("before clearing\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := state.TruncateLog(path); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	// The same still-open handle keeps writing.
+	if _, err := f.WriteString("after clearing\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(data) != "after clearing\n" {
+		t.Errorf("log holds %q, want just the line written after clearing", data)
 	}
 }

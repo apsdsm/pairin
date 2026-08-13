@@ -93,9 +93,15 @@ func (m FleetModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case hub.Msg:
 		// Log lines only flow for the service being zoomed into; everything
 		// else is a state change that the next refresh will pick up.
-		if inner, ok := msg.Inner.(process.LogMsg); ok {
+		switch inner := msg.Inner.(type) {
+		case process.LogMsg:
 			if m.zoomed && msg.ID == m.zoomID && inner.Index == m.zoomIndex {
 				m.pane.AppendLine(inner.Line)
+			}
+			return m, nil
+		case process.LogsClearedMsg:
+			if m.zoomed && msg.ID == m.zoomID && inner.Index == m.zoomIndex {
+				m.pane.Clear()
 			}
 			return m, nil
 		}
@@ -206,6 +212,25 @@ func (m FleetModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "S":
 		return m.stopProject()
+
+	case "c":
+		return m.act("clear logs for", func(id hub.InstanceID, svc string) error {
+			return m.hub.ClearLogs(id, svc)
+		})
+
+	case "C":
+		// Whole project, mirroring the s/S and x/S pairing.
+		inst, _, ok := m.selection()
+		if !ok {
+			return m, nil
+		}
+		if inst.State != hub.StateConnected {
+			return m.fail(fmt.Sprintf("%s is not running", inst.Label())), nil
+		}
+		if err := m.hub.ClearLogs(inst.ID, ""); err != nil {
+			return m.fail(fmt.Sprintf("could not clear logs for %s: %v", inst.Label(), err)), nil
+		}
+		return m.note(fmt.Sprintf("cleared all logs in %s", inst.Label())), nil
 	}
 
 	return m, nil
@@ -406,16 +431,24 @@ func (m *FleetModel) refresh() {
 	m.grid.SetGroups(groups)
 }
 
+// fleetChromeLines is how many lines the frame costs: the glyph key, the
+// summary header, the status line and the key hints. Fixed, so that content
+// never reflows when a status message appears.
+const fleetChromeLines = 4
+
 func (m *FleetModel) resize() {
 	if m.width == 0 || m.height == 0 {
 		return
 	}
-	available := m.height - 2 // header + footer
+	available := m.height - fleetChromeLines
+	if available < 1 {
+		available = 1
+	}
 	if m.zoomed {
 		m.pane.SetSize(m.width, available)
 		return
 	}
-	m.grid.SetSize(m.width, available-2) // blank line + legend
+	m.grid.SetSize(m.width, available)
 }
 
 func (m FleetModel) View() string {
@@ -423,23 +456,20 @@ func (m FleetModel) View() string {
 		return "Starting..."
 	}
 
-	var b strings.Builder
-	b.WriteString(m.renderHeader())
-	b.WriteString("\n")
+	// The glyph key sits at the top, where it stays put. Below the grid it
+	// moved down the screen every time a project gained a row.
+	body := GridLegend() + "\n" + m.renderHeader() + "\n"
 
+	content := m.grid.View()
 	if m.zoomed {
-		b.WriteString(m.pane.RenderFocus())
-	} else {
-		body := m.grid.View() + "\n\n" + GridLegend()
-		if pad := (m.height - 2) - (strings.Count(body, "\n") + 1); pad > 0 {
-			body += strings.Repeat("\n", pad)
-		}
-		b.WriteString(body)
+		content = m.pane.RenderFocus()
+	}
+	// Pad to a fixed height so the footer doesn't walk up and down.
+	if pad := (m.height - fleetChromeLines) - (strings.Count(content, "\n") + 1); pad > 0 {
+		content += strings.Repeat("\n", pad)
 	}
 
-	b.WriteString("\n")
-	b.WriteString(m.renderFooter())
-	return b.String()
+	return body + content + "\n" + m.renderStatus() + "\n" + m.renderKeys()
 }
 
 func (m FleetModel) renderHeader() string {
@@ -476,24 +506,36 @@ func (m FleetModel) renderHeader() string {
 	return head
 }
 
-func (m FleetModel) renderFooter() string {
-	if m.quitting {
+// renderStatus is the line above the key hints. It carries the result of the
+// last action, or the filter being typed. It is always present, even when
+// empty, so that a message appearing doesn't push the rest of the screen up.
+func (m FleetModel) renderStatus() string {
+	switch {
+	case m.quitting:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true).Render("Closing…")
-	}
-	if m.filtering {
-		return HeaderStyle.Render("/"+m.filterInput) + FooterStyle.Render("  enter accept  esc clear")
-	}
-	if m.status != "" {
-		style := DimStyle
+	case m.filtering:
+		return HeaderStyle.Render("/" + m.filterInput)
+	case m.status != "":
 		if m.statusErr {
-			style = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render("⚠ " + m.status)
 		}
-		return style.Render(m.status)
+		return DimStyle.Render(m.status)
+	default:
+		return ""
 	}
-	if m.zoomed {
-		return FooterStyle.Render("↑↓ scroll  r restart  z back  q quit")
+}
+
+// renderKeys is the bottom line: what you can press. It stays visible while a
+// status message is showing, on its own line.
+func (m FleetModel) renderKeys() string {
+	switch {
+	case m.filtering:
+		return FooterStyle.Render("enter accept  esc clear")
+	case m.zoomed:
+		return FooterStyle.Render("↑↓ scroll  r restart  c clear logs  z back  q quit")
+	default:
+		return FooterStyle.Render("↑↓←→ move  z logs  r restart  x stop  s start  S down  c clear logs  b cells  / filter  q quit")
 	}
-	return FooterStyle.Render("↑↓←→ move  z logs  r restart  x stop  s start  S down  b cells  / filter  q quit")
 }
 
 // instanceSubtitle is the line beside a project's name: where it lives and what

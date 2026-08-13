@@ -555,6 +555,14 @@ func (h *Hub) StartProject(id InstanceID) error {
 	return launcher.Start(string(id), launcher.DefaultTimeout)
 }
 
+// ClearLogs discards a service's history. An empty service name clears every
+// service in the project.
+func (h *Hub) ClearLogs(id InstanceID, service string) error {
+	return h.withClient(id, func(c *control.Client) error {
+		return c.RequestClearLogs(service)
+	})
+}
+
 // StopProject shuts a whole project down.
 func (h *Hub) StopProject(id InstanceID) error {
 	return h.withClient(id, func(c *control.Client) error {

@@ -76,6 +76,14 @@ func (p *Pane) SyncFromBuffer() {
 	p.updateContent()
 }
 
+// Clear empties the pane. Used when the service's history has been discarded —
+// the pane holds its own copy of the lines, so clearing the buffer behind it
+// isn't enough.
+func (p *Pane) Clear() {
+	p.lines = nil
+	p.updateContent()
+}
+
 func (p *Pane) updateContent() {
 	content := strings.Join(p.lines, "\n")
 	p.viewport.SetContent(content)

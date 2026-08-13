@@ -37,6 +37,12 @@ type Backend interface {
 	SetProgram(p *tea.Program)
 }
 
+// LogClearer is the optional half of a Backend that can discard a service's
+// history. A remote control.Client implements it.
+type LogClearer interface {
+	RequestClearLogs(service string) error
+}
+
 // Connection is the optional half of a Backend that can drop and be restored.
 // A remote control.Client implements it; a local process.Manager has nothing
 // to disconnect from and simply doesn't.
@@ -213,6 +219,14 @@ func (m DashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Just trigger a re-render.
 		return m, nil
 
+	case process.LogsClearedMsg:
+		// The pane holds its own copy of the lines, so emptying the service's
+		// ring buffer isn't enough.
+		if msg.Index >= 0 && msg.Index < len(m.panes) {
+			m.panes[msg.Index].Clear()
+		}
+		return m, nil
+
 	case DisconnectedMsg:
 		if m.quitting || m.disconnected {
 			return m, nil
@@ -352,6 +366,20 @@ func (m DashboardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.recalcPaneSizes()
 		}
 		return m, nil
+
+	case "c":
+		idx := m.activeIndex()
+		svcs := m.mgr.ServiceList()
+		if idx < 0 || idx >= len(svcs) {
+			return m, nil
+		}
+		name := svcs[idx].View().Name
+		return m, guarded("clear-logs", func() tea.Msg {
+			if cl, ok := m.mgr.(LogClearer); ok {
+				_ = cl.RequestClearLogs(name)
+			}
+			return nil
+		})
 
 	case "r":
 		idx := m.activeIndex()
@@ -503,14 +531,19 @@ func (m *DashboardModel) recalcPaneSizes() {
 		return
 	}
 
-	// Reserve 2 lines for header and 1 for footer
-	headerHeight := 1
-	footerHeight := 1
-	availableHeight := m.height - headerHeight - footerHeight
+	// Chrome is a fixed height so nothing reflows when a status appears: the
+	// header, the status line and the key hints, plus the glyph key in grid
+	// view (which sits at the top, where it doesn't move).
+	availableHeight := m.height - 3
+	if m.view == viewGrid {
+		availableHeight--
+	}
+	if availableHeight < 1 {
+		availableHeight = 1
+	}
 
 	if m.view == viewGrid {
-		// Reserve a blank line and the glyph legend beneath the grid.
-		m.grid.SetSize(m.width, availableHeight-2)
+		m.grid.SetSize(m.width, availableHeight)
 		return
 	}
 
@@ -548,35 +581,44 @@ func (m DashboardModel) View() string {
 
 	var b strings.Builder
 
-	// Header
+	// In grid view the glyph key goes at the top, where it stays put rather
+	// than sliding down the screen as projects gain rows.
+	chrome := 3
+	if m.view == viewGrid {
+		b.WriteString(GridLegend())
+		b.WriteString("\n")
+		chrome++
+	}
+
 	b.WriteString(m.renderHeader())
 	b.WriteString("\n")
 
-	// Main content
+	var content string
 	switch {
 	case m.view == viewGrid:
-		grid := m.grid.View()
-		body := grid + "\n\n" + GridLegend()
-		// Pad to the full height so the footer stays put instead of walking up
-		// and down the screen as services start, stop, or get filtered out.
-		if pad := (m.height - 2) - (strings.Count(body, "\n") + 1); pad > 0 {
-			body += strings.Repeat("\n", pad)
-		}
-		b.WriteString(body)
+		content = m.grid.View()
 	case m.view == viewFocus && m.focused >= 0 && m.focused < len(m.panes):
-		b.WriteString(m.panes[m.focused].RenderFocus())
+		content = m.panes[m.focused].RenderFocus()
 	default:
+		var panes strings.Builder
 		for i := range m.panes {
-			b.WriteString(m.panes[i].RenderSplit(i == m.active))
+			panes.WriteString(m.panes[i].RenderSplit(i == m.active))
 			if i < len(m.panes)-1 {
-				b.WriteString("\n")
+				panes.WriteString("\n")
 			}
 		}
+		content = panes.String()
 	}
+	// Pad to a fixed height so the footer doesn't walk up and down.
+	if pad := (m.height - chrome) - (strings.Count(content, "\n") + 1); pad > 0 {
+		content += strings.Repeat("\n", pad)
+	}
+	b.WriteString(content)
 
-	// Footer
 	b.WriteString("\n")
-	b.WriteString(m.renderFooter())
+	b.WriteString(m.renderStatus())
+	b.WriteString("\n")
+	b.WriteString(m.renderKeys())
 
 	return b.String()
 }
@@ -599,31 +641,40 @@ func (m DashboardModel) renderHeader() string {
 	return name + "  " + summary
 }
 
-func (m DashboardModel) renderFooter() string {
-	if m.quitting {
+// renderStatus is the line above the key hints — transient state, always
+// present even when empty so the layout doesn't shift when a message appears.
+func (m DashboardModel) renderStatus() string {
+	switch {
+	case m.quitting:
 		msg := "Detaching..."
 		if m.shuttingDown {
 			msg = "Shutting down..."
 		}
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("3")).Bold(true).Render(msg)
-	}
-	if m.disconnected {
+	case m.disconnected:
 		msg := fmt.Sprintf("supervisor unreachable — reconnecting in %s", m.retryDelay.Round(100*time.Millisecond))
 		if m.retryErr != nil {
 			msg += fmt.Sprintf(" (%v)", m.retryErr)
 		}
 		return lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true).Render("⚠ " + msg)
+	case m.filtering:
+		return HeaderStyle.Render("/" + m.filterInput)
+	default:
+		return ""
 	}
-	if m.filtering {
-		return HeaderStyle.Render("/"+m.filterInput) + FooterStyle.Render("  enter accept  esc clear")
-	}
+}
 
+// renderKeys is the bottom line, and stays visible while a status is showing.
+func (m DashboardModel) renderKeys() string {
+	if m.filtering {
+		return FooterStyle.Render("enter accept  esc clear")
+	}
 	switch m.view {
 	case viewGrid:
-		return FooterStyle.Render("↑↓←→ move  z zoom  r restart  b cells  / filter  v split  q detach  d down")
+		return FooterStyle.Render("↑↓←→ move  z zoom  r restart  c clear logs  b cells  / filter  v split  q detach  d down")
 	case viewFocus:
-		return FooterStyle.Render("↑↓ scroll  r restart  z back  q detach  d down")
+		return FooterStyle.Render("↑↓ scroll  r restart  c clear logs  z back  q detach  d down")
 	default:
-		return FooterStyle.Render("tab cycle  r restart  z zoom  v grid  q detach  d down")
+		return FooterStyle.Render("tab cycle  r restart  c clear logs  z zoom  v grid  q detach  d down")
 	}
 }

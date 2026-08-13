@@ -69,6 +69,8 @@ If a previous supervisor exited without cleaning up, `pairin up` detects the orp
 
 `--clear-logs` (on `pairin` / `pairin up`) deletes the existing service logs in `.pairin/logs/` before starting, so the TUI opens with fresh panes instead of preloading history from previous sessions. It refuses to run while a supervisor is already up — stop it with `pairin down` first.
 
+To clear logs *without* stopping anything, press `c` in either TUI (or `C` in the dashboard for a whole project). That empties the log in place rather than deleting it, which is what makes it safe while the service is running: services write with `O_APPEND`, so after truncation they simply resume from the start of the file. Deleting it instead would leave the service writing to a file nobody can read.
+
 ## The Dashboard
 
 `pairin dash` shows every project on the host at once — no tmux required:
@@ -139,6 +141,7 @@ another terminal appear on their own, and supervisors that go away are dropped.
 | `x`            | Stop the selected service                                  |
 | `s`            | Start the selected service, or the whole project if it's down |
 | `S`            | Shut down the selected project                             |
+| `c` / `C`      | Clear the selected service's logs / the whole project's    |
 | `b`            | Cycle cell style: plain → boxed → cards                    |
 | `/`            | Filter services by name, across every project              |
 | `q` / `ctrl+c` | Close the dashboard (everything keeps running)             |
@@ -281,6 +284,7 @@ In grid view each cell carries a status glyph: `●` up, `◍` running but faili
 | `/`            | Filter services by name (grid view)                        |
 | `b`            | Cycle cell style: plain → boxed → cards (grid view)        |
 | `r`            | Restart the selected service                               |
+| `c`            | Clear the selected service's logs                          |
 | `q` / `ctrl+c` | Detach the TUI (services and supervisor keep running)      |
 | `d`            | Shut down: stop every service and exit the supervisor      |
 

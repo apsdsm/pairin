@@ -174,6 +174,12 @@ func (c *Client) RequestStart(service string) error {
 	return c.send(Request{Kind: ReqStart, Service: service})
 }
 
+// RequestClearLogs asks the supervisor to discard a service's history. An empty
+// name clears every service in the project.
+func (c *Client) RequestClearLogs(service string) error {
+	return c.send(Request{Kind: ReqClearLogs, Service: service})
+}
+
 // StopAll in client mode does nothing to the services themselves — 'q' in
 // the TUI becomes a detach rather than a shutdown. Use Shutdown for the
 // explicit "kill everything" path.
@@ -300,6 +306,16 @@ func (c *Client) apply(evt Event) {
 		}
 		c.Services[idx].ApplyHealth(evt.Health.Healthy)
 		c.forward(process.HealthCheckMsg{Index: idx, Healthy: evt.Health.Healthy})
+	case EvtLogsCleared:
+		if evt.LogsCleared == nil {
+			return
+		}
+		idx, ok := c.nameToIdx[evt.LogsCleared.Service]
+		if !ok {
+			return
+		}
+		c.Services[idx].ClearLogBuffer()
+		c.forward(process.LogsClearedMsg{Index: idx})
 	case EvtShutdown:
 		// Supervisor is going away; the read loop will see EOF next.
 	}

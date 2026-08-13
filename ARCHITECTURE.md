@@ -127,7 +127,17 @@ Client -> Server (Request)              Server -> Client (Event)
 {"kind":"stop",   "service":"web"}      {"kind":"log",      "log":      {...}}
 {"kind":"start",  "service":"web"}      {"kind":"health",   "health":   {...}}
 {"kind":"shutdown"}                     {"kind":"shutdown"}
+{"kind":"subscribe","log_mode":"none"}  {"kind":"logs_cleared","logs_cleared":{...}}
+{"kind":"clear_logs","service":"web"}
 ```
+
+`clear_logs` with an empty `service` clears every service in the project. The supervisor **truncates**
+the log rather than unlinking it: services are started with `O_APPEND`, so after truncation the child
+resumes writing from the start of the file, whereas unlinking would leave it writing to an inode
+nobody can read. (`pairin --clear-logs` *does* delete the files, which is why it only works before a
+supervisor starts.) The tailer already handles a file shrinking below its read offset. Clients drop
+their mirrored copy on `logs_cleared`, and panes clear themselves — a pane holds its own slice of
+lines, so emptying the ring buffer behind it is not enough.
 
 A new client always receives an `EvtSnapshot` first, then a stream of incremental events. The snapshot contains everything the TUI needs to render before any further events arrive (project name, started-at timestamp, and per-service name/short/color/dir/cmd/status/PID/branch/health/adopted/log_file/restart_count/max_restarts/depends_on).
 
@@ -498,17 +508,22 @@ The initial view is **chosen, not fixed**: if `availableHeight / len(panes)` is 
 `minSplitPaneHeight` (6), the model opens in grid view, because twenty two-line viewports show
 nothing. Pressing `v` sets `viewChosen`, after which resizes leave the choice alone.
 
+Chrome is a **fixed** number of lines — glyph key, header, status, key hints — and the content area
+is padded to fill what remains. Two consequences, both deliberate: the glyph key sits at the top
+where it stays put (below the grid it slid down the screen every time a project gained a row), and a
+status message gets its own line *above* the key hints rather than replacing them, without the rest
+of the screen reflowing to make room.
+
 ```
 +---------------------------------------------------------------+
+| ● up  ◍ unhealthy  ◐ starting  ⋯ waiting  ⟳ restarting  ...    |  <- glyph key, fixed
 | bigproject   20 services · 18 up            filter: api        |  <- header + tally
-+---------------------------------------------------------------+
 |  ● postgres     ● redis       ● api         ◍ worker           |
 | ›● migrations   ○ mailhog     ✕ scheduler   ⟳ indexer 3/5      |  <- › marks selection
 |  ⋯ reporter     ● gateway                                      |
-|                                                                |
-| ● up  ◍ unhealthy  ◐ starting  ⋯ waiting  ⟳ restarting  ...    |  <- legend
-+---------------------------------------------------------------+
-| ↑↓←→ move  z zoom  r restart  / filter  v split  q detach      |
+|                                                                |  <- padded to fixed height
+| restart scheduler                                              |  <- status (blank when idle)
+| ↑↓←→ move  z zoom  r restart  c clear logs  b cells  q detach  |  <- key hints
 +---------------------------------------------------------------+
 ```
 
