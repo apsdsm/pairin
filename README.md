@@ -1,13 +1,12 @@
 # pairin
 
-A terminal dashboard for running multiple local development services in parallel. Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea).
+A terminal dashboard for running multiple local development services in parallel.
 
 pairin reads a `.pairinrc.toml` config file from the current directory (or any parent directory), spawns a detached supervisor that runs all defined services, and attaches a split-pane TUI to it. The TUI can be detached and reattached without restarting the services.
 
 <p align="center">
   <img src="pairin.jpeg" alt="pairin" width="400">
 </p>
-
 
 ## Install
 
@@ -71,30 +70,9 @@ If a previous supervisor exited without cleaning up, `pairin up` detects the orp
 
 To clear logs *without* stopping anything, press `c` in either TUI (or `C` in the dashboard for a whole project). That empties the log in place rather than deleting it, which is what makes it safe while the service is running: services write with `O_APPEND`, so after truncation they simply resume from the start of the file. Deleting it instead would leave the service writing to a file nobody can read.
 
-## The Dashboard
+## Dashboard Mode
 
-`pairin dash` shows every project on the host at once — no tmux required:
-
-```
-● up  ◍ unhealthy  ◐ starting  ⋯ waiting  ⟳ restarting  ✕ crashed  ○ stopped   ◆ pinned  ◇ unpinned
-pairin  5 projects (4 up) · 19 services · 15 running
-
-◆ Acme API  ~/Code/acme-api  sup 2861956  1m
- ● postgres             ● redis                ● api
-
-◆ Analytics  ~/Code/analytics  stopped — press s to start
-›○ ingest               ○ rollup
-
-◆ JJC2 (localdev)  ~/Code/jjc2_main  sup 2847550  7m
- ● db                   ● system_api           ● user_web             ● employee_web
- ● sysadmin_web         ● process_runner       ● docs
-
-◇ Temp Check  /tmp/tempproj  sup 1203880  40s
- ● probe
-
-restart web in Acme API
-↑↓←→ move  z logs  r restart  x stop  s start  S down  c clear  p pin  b cells  / filter  q quit
-```
+`pairin dash` shows every project on the host at once.
 
 The key sits on the first line where it stays put, and the bottom two lines are the last action's
 result and the keys — the result gets its own line rather than replacing them.
@@ -118,22 +96,7 @@ other. `pairin projects` shows the pin state of everything in the catalog.
 
 ### Adding a project from the dashboard
 
-`a` opens a project picker in the bottom half of the screen, leaving the dashboard visible above it:
-
-```
-◆ Acme API  ~/Code/acme-api  sup 2861956  1m
- ● postgres             ● redis                ● api
-
-── add a project ──────────────────────────────────────────────────────────────
-~/Code
-› ../
-  beholder/
-  jjc2_main/                                                          2 configs
-  jjc_main/                                                            1 config
-  lgc_main/                                                           2 configs
-
-↑↓ move  enter open/add  ← up  esc close
-```
+`a` opens a project picker in the bottom half of the screen. 
 
 It lists directories and pairin configs, nothing else. The count on the right says how many configs
 each directory holds, so it's clear which are worth opening. Inside a project, configs are labelled
@@ -147,40 +110,7 @@ screen, so adding it pins it and makes it appear.
 `enter` on a directory descends, `←` goes up, `enter` on a config adds it (pinned) and closes the
 picker. The directory you were last in is remembered for next time.
 
-### Cell styles
-
-`b` cycles how much room each service gets — densest first:
-
-```
-plain    ›● postgres         ● redis            ⋯ api
-
-boxed    ┏━━━━━━━━━━━━━━┓ ╭──────────────╮ ╭──────────────╮
-         ┃›● postgres   ┃ │ ● redis      │ │ ⋯ api        │
-         ┗━━━━━━━━━━━━━━┛ ╰──────────────╯ ╰──────────────╯
-
-cards    ┏━━━━━━━━━━━━━━┓ ╭──────────────╮ ╭──────────────╮
-         ┃›● postgres   ┃ │ ● redis      │ │ ⋯ api        │
-         ┃   unhealthy  ┃ │   pid 2995280│ │   waits db   │
-         ┗━━━━━━━━━━━━━━┛ ╰──────────────╯ ╰──────────────╯
-```
-
-**plain** fits the most on screen. **boxed** costs three lines per row instead of one. **cards**
-adds a second line carrying what the glyph can't say on its own — PID, which dependency a service is
-waiting on, how many restarts it has left. The selected cell takes a heavy border as well as the
-caret.
-
-Your choice is remembered: whichever style you were last in is the one the next `pairin dash` opens
-in. It's stored in `$XDG_STATE_HOME/pairin/ui.json` (default `~/.local/state/pairin/ui.json`) and
-shared with the per-project grid view, where the same key works.
-
-`z` on any service opens its logs full-screen. Only that one service streams its output while you're
-looking at it; the rest of the host's logs stay off the wire.
-
-`q` closes the dashboard and touches nothing. Stopping is always explicit: `x` for a service, `S` for
-a whole project.
-
-The dashboard re-reads the catalog and the registry every couple of seconds, so projects you start in
-another terminal appear on their own, and supervisors that go away are dropped.
+### Other Commands
 
 | Key            | Action                                                     |
 |----------------|------------------------------------------------------------|
@@ -197,7 +127,55 @@ another terminal appear on their own, and supervisors that go away are dropped.
 | `/`            | Filter services by name, across every project              |
 | `q` / `ctrl+c` | Close the dashboard (everything keeps running)             |
 
-## The Project Catalog
+`b` cycles how much room each service gets.
+
+`z` on any service opens its logs full-screen. Only that one service streams its output while you're
+looking at it; the rest of the host's logs stay off the wire.
+
+`q` closes the dashboard and touches nothing. Stopping is always explicit: `x` for a service, `S` for
+a whole project.
+
+The dashboard re-reads the catalog and the registry every couple of seconds, so projects you start in
+another terminal appear on their own, and supervisors that go away are dropped.
+
+
+## Standalone Mode
+
+pairin while running in stand-alone mode has three views:
+
+- **split** — every service gets a log pane, stacked. The default for a handful of services.
+- **grid** — a compact status grid, one cell per service. Built for configs too big to give
+  everything a readable pane.
+- **focus** — one service's logs, full screen.
+
+`v` switches between split and grid; `z` (or `enter`) zooms the selected service to full screen and
+back. If there are so many services that each pane would be under 6 lines tall, pairin **starts in
+grid view on its own** — twenty two-line viewports show nothing useful. Pressing `v` takes the choice
+back, and pairin stops second-guessing it on resize.
+
+In grid view each cell carries a status glyph: `●` up, `◍` running but failing its healthcheck,
+`◐` starting, `⋯` waiting on a dependency, `⟳` restarting, `✕` crashed, `○` stopped.
+
+### Keyboard Shortcuts
+
+| Key            | Action                                                     |
+|----------------|------------------------------------------------------------|
+| `1`-`9`        | Focus a service pane full-screen                           |
+| `v`            | Switch between split and grid view                         |
+| `z` / `enter`  | Zoom the selected service full-screen, and back            |
+| `esc`          | Leave focus view, or clear the grid filter                 |
+| `tab`          | Cycle selection forward                                    |
+| `shift+tab`    | Cycle selection backward                                   |
+| `←↑↓→` / `hjkl`| Move the selection (grid) or scroll logs (split / focus)   |
+| `/`            | Filter services by name (grid view)                        |
+| `b`            | Cycle cell style: plain → boxed → cards (grid view)        |
+| `r`            | Restart the selected service                               |
+| `c`            | Clear the selected service's logs                          |
+| `q` / `ctrl+c` | Detach the TUI (services and supervisor keep running)      |
+| `d`            | Shut down: stop every service and exit the supervisor      |
+
+
+## Register Projects
 
 Rather than cd-ing around to find configs, register your projects once and start them by name from
 anywhere:
@@ -234,7 +212,7 @@ It's config, not state: it survives a state cleanup, it's safe to hand-edit, and
 keep in a dotfiles repo. `pairin projects` flags entries whose config file has moved or been deleted
 rather than quietly reporting them as stopped.
 
-### `-c` / `--config`
+## Alternative Configs
 
 `pairin`, `pairin up`, `pairin attach`, and `pairin down` accept `-c <path>` to point at a specific `.pairinrc.toml` instead of searching from the current directory. Relative paths are resolved against the current working directory. Each config's supervisor, socket, state, and logs live under `<config-dir>/.pairin/`, so configs in different directories don't interfere.
 
@@ -266,7 +244,7 @@ pairin attach -c /path/to/.pairinrc.toml
 | `restart_delay` | Cooldown before restarting, Go duration string (default: `"3s"`)   |
 | `max_restarts`  | Max consecutive auto-restarts before giving up; `0` = unlimited (default: `0`) |
 
-## Service Dependencies & Healthchecks
+### Service Dependencies & Healthchecks
 
 Services can declare healthchecks and depend on other services:
 
@@ -287,7 +265,7 @@ depends_on = ["database"]
 - Services with unmet dependencies show as **waiting** (magenta) and auto-start when dependencies become healthy
 - Healthcheck is orthogonal to status: a service can be running but not yet healthy
 
-## Auto-Restart
+### Auto-Restart
 
 Services can automatically restart when they exit, using systemd-style policies:
 
@@ -306,42 +284,7 @@ max_restarts = 5
 - The title bar shows restart count (e.g. `restarting 3/5` or `restarting #3`)
 - Manual restart (`r` key) resets the restart counter
 
-## Views
-
-pairin has three views:
-
-- **split** — every service gets a log pane, stacked. The default for a handful of services.
-- **grid** — a compact status grid, one cell per service. Built for configs too big to give
-  everything a readable pane.
-- **focus** — one service's logs, full screen.
-
-`v` switches between split and grid; `z` (or `enter`) zooms the selected service to full screen and
-back. If there are so many services that each pane would be under 6 lines tall, pairin **starts in
-grid view on its own** — twenty two-line viewports show nothing useful. Pressing `v` takes the choice
-back, and pairin stops second-guessing it on resize.
-
-In grid view each cell carries a status glyph: `●` up, `◍` running but failing its healthcheck,
-`◐` starting, `⋯` waiting on a dependency, `⟳` restarting, `✕` crashed, `○` stopped.
-
-## Keyboard Shortcuts
-
-| Key            | Action                                                     |
-|----------------|------------------------------------------------------------|
-| `1`-`9`        | Focus a service pane full-screen                           |
-| `v`            | Switch between split and grid view                         |
-| `z` / `enter`  | Zoom the selected service full-screen, and back            |
-| `esc`          | Leave focus view, or clear the grid filter                 |
-| `tab`          | Cycle selection forward                                    |
-| `shift+tab`    | Cycle selection backward                                   |
-| `←↑↓→` / `hjkl`| Move the selection (grid) or scroll logs (split / focus)   |
-| `/`            | Filter services by name (grid view)                        |
-| `b`            | Cycle cell style: plain → boxed → cards (grid view)        |
-| `r`            | Restart the selected service                               |
-| `c`            | Clear the selected service's logs                          |
-| `q` / `ctrl+c` | Detach the TUI (services and supervisor keep running)      |
-| `d`            | Shut down: stop every service and exit the supervisor      |
-
-## When Something Goes Wrong
+## Crash Logs
 
 If pairin itself crashes, it writes a report to `$XDG_STATE_HOME/pairin/crash-<timestamp>-<pid>.log`
 (default `~/.local/state/pairin/`) naming the goroutine and the stack. A TUI crash leaves your
@@ -352,9 +295,14 @@ reattaches by itself once the supervisor is back.
 
 ## How It Works
 
-- Running `pairin` spawns a detached supervisor process (its own session leader) and attaches a TUI client to it over a unix socket at `.pairin/control.sock`. Closing the TUI with `q` leaves the supervisor and its services running; reattach later with `pairin` or `pairin attach`. Use `d` (or `pairin down`) to stop everything.
+- Running `pairin` spawns a detached supervisor process (its own session leader) and attaches a TUI client to it over a unix socket at `.pairin/control.sock`. Closing the TUI with `q` leaves the supervisor and its services running;<img width="600" height="362" alt="pairin-screenshot-01" src="https://github.com/user-attachments/assets/6b82c149-1f96-4ad5-b9bb-8afd4ab51c52" />
+ reattach later with `pairin` or `pairin attach`. Use `d` (or `pairin down`) to stop everything.
 - Each service runs as a subprocess in its own process group, so the supervisor can clean up child processes on stop.
 - Per-service stdout and stderr are merged into both an in-memory ring buffer (1000 lines, used by the TUI) and a rotating log file at `.pairin/logs/<service>.log` (rotated to `.log.1` once it exceeds 10 MiB).
 - The supervisor announces itself in a host-wide registry (under `$XDG_STATE_HOME/pairin/instances/`, defaulting to `~/.local/state/pairin/instances/`), which is what `pairin ls` and `pairin status` read.
 - On restart, the process receives SIGINT with a 5-second grace period before SIGKILL.
 - Git branch is detected automatically for each service directory.
+
+## Uses
+
+- [Bubble Tea](https://github.com/charmbracelet/bubbletea).
