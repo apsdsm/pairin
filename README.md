@@ -138,8 +138,11 @@ other. `pairin projects` shows the pin state of everything in the catalog.
 It lists directories and pairin configs, nothing else. The count on the right says how many configs
 each directory holds, so it's clear which are worth opening. Inside a project, configs are labelled
 with their `[project].name` rather than just a filename — which matters when a project keeps
-`.pairinrc.toml` and `.pairinrc.localdev.toml` side by side — and anything already in the catalog is
-flagged so it can't be added twice.
+`.pairinrc.toml` and `.pairinrc.localdev.toml` side by side.
+
+Configs already in the dashboard are marked `already added` and refuse to be added twice. A config
+that's in the catalog but **unpinned** is marked `unpinned — enter to pin` instead: it isn't on
+screen, so adding it pins it and makes it appear.
 
 `enter` on a directory descends, `←` goes up, `enter` on a config adds it (pinned) and closes the
 picker. The directory you were last in is remembered for next time.

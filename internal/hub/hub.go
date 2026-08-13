@@ -574,9 +574,15 @@ func (h *Hub) StartProject(id InstanceID) error {
 	return launcher.Start(string(id), launcher.DefaultTimeout)
 }
 
-// AddProject registers a config the user picked, pinned — going looking for it
-// is the same deliberate signal `pairin register` carries. Returns the catalog
-// name it was given.
+// AddProject makes a config appear in the dashboard, pinned — going looking for
+// it is the same deliberate signal `pairin register` carries. Returns the
+// catalog name it was given.
+//
+// A config that is already catalogued but *unpinned* is pinned rather than
+// rejected. Catalogue membership and dashboard visibility are different
+// questions: an unpinned, stopped project has a record but isn't shown, and
+// refusing to add it would mean telling the user it's already in a list they
+// can plainly see it isn't in.
 //
 // The config is loaded first: adding something that turns out not to be a valid
 // pairin config would put an entry in the catalog that can never start.
@@ -589,9 +595,6 @@ func (h *Hub) AddProject(configPath string) (string, error) {
 	cat, err := catalog.Load()
 	if err != nil {
 		return "", fmt.Errorf("loading catalog: %w", err)
-	}
-	if existing, ok := cat.ByConfig(cfg.Path); ok {
-		return existing.Name, nil
 	}
 	entry, err := cat.SetPinned(cfg.Path, cfg.Project.Name, true)
 	if err != nil {

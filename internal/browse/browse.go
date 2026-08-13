@@ -36,8 +36,12 @@ type Entry struct {
 	// clear which ones are worth opening. -1 means "not counted".
 	Configs int
 
-	// Added is true when the config is already in the catalog.
-	Added bool
+	// Added is true when the config is already in the catalog. Pinned says
+	// whether it is actually *shown* there — an unpinned, stopped project is
+	// catalogued but invisible, and offering to add it is the right thing to
+	// do rather than refusing because a record exists somewhere.
+	Added  bool
+	Pinned bool
 }
 
 // maxProbes bounds how many subdirectories are scanned for a config count.
@@ -60,13 +64,13 @@ func IsConfigName(name string) bool {
 	return strings.HasPrefix(name, ".pairinrc") && strings.HasSuffix(name, ".toml")
 }
 
-// Read lists dir. added reports whether a config path is already catalogued;
-// it may be nil.
+// Read lists dir. lookup reports, for a config path, whether it is already
+// catalogued and whether it is pinned. It may be nil.
 //
 // Configs come first, then subdirectories, each alphabetical, with the parent
 // directory at the top. That ordering puts the thing you came for above the
 // places you'd go looking for it.
-func Read(dir string, added func(string) bool) ([]Entry, error) {
+func Read(dir string, lookup func(string) (added, pinned bool)) ([]Entry, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, err
@@ -111,8 +115,8 @@ func Read(dir string, added func(string) bool) ([]Entry, error) {
 			Project:  ProjectName(path),
 			Configs:  -1,
 		}
-		if added != nil {
-			e.Added = added(path)
+		if lookup != nil {
+			e.Added, e.Pinned = lookup(path)
 		}
 		configs = append(configs, e)
 	}

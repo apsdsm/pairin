@@ -165,25 +165,45 @@ func TestReadSkipsNoiseDirectories(t *testing.T) {
 	}
 }
 
-// Configs already in the catalog are flagged so they aren't added twice.
-func TestReadFlagsAlreadyAdded(t *testing.T) {
+// Configs already in the catalog are flagged, and pinned ones distinguished
+// from merely-catalogued ones: an unpinned project isn't visible in the
+// dashboard, so the picker has to offer it rather than call it already added.
+func TestReadFlagsCatalogueMembership(t *testing.T) {
 	root := t.TempDir()
-	known := filepath.Join(root, ".pairinrc.toml")
-	write(t, known, "[project]\nname = \"Known\"\n")
-	write(t, filepath.Join(root, ".pairinrc.other.toml"), "[project]\nname = \"Other\"\n")
+	pinned := filepath.Join(root, ".pairinrc.toml")
+	hidden := filepath.Join(root, ".pairinrc.hidden.toml")
+	fresh := filepath.Join(root, ".pairinrc.new.toml")
+	write(t, pinned, "[project]\nname = \"Pinned\"\n")
+	write(t, hidden, "[project]\nname = \"Hidden\"\n")
+	write(t, fresh, "[project]\nname = \"New\"\n")
 
-	entries, err := Read(root, func(p string) bool { return p == known })
+	entries, err := Read(root, func(p string) (bool, bool) {
+		switch p {
+		case pinned:
+			return true, true
+		case hidden:
+			return true, false
+		}
+		return false, false
+	})
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
 
+	got := map[string][2]bool{}
 	for _, e := range entries {
-		if !e.IsConfig {
-			continue
+		if e.IsConfig {
+			got[e.Path] = [2]bool{e.Added, e.Pinned}
 		}
-		want := e.Path == known
-		if e.Added != want {
-			t.Errorf("%s Added = %v, want %v", e.Name, e.Added, want)
+	}
+	for path, want := range map[string][2]bool{
+		pinned: {true, true},
+		hidden: {true, false},
+		fresh:  {false, false},
+	} {
+		if got[path] != want {
+			t.Errorf("%s = added:%v pinned:%v, want added:%v pinned:%v",
+				filepath.Base(path), got[path][0], got[path][1], want[0], want[1])
 		}
 	}
 }

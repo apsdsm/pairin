@@ -701,9 +701,10 @@ func TestFleetBrowserRejectsABadConfig(t *testing.T) {
 	}
 }
 
-// Configs already in the catalog are flagged and refuse to be added twice.
-func TestFleetBrowserFlagsAlreadyAdded(t *testing.T) {
-	m, _ := newFleet(t, 100, 30, func(r string) {
+// A config that is pinned is genuinely on screen already, so the picker refuses
+// it rather than doing something the user cannot see the effect of.
+func TestFleetBrowserRefusesAPinnedConfig(t *testing.T) {
+	m, h := newFleet(t, 100, 30, func(r string) {
 		fleetProject(t, r, "alpha", "web")
 	})
 
@@ -711,10 +712,18 @@ func TestFleetBrowserFlagsAlreadyAdded(t *testing.T) {
 	if !ok {
 		t.Fatal("nothing selected")
 	}
+	// Pinned is the only state that is genuinely "already in the list" —
+	// running-but-unpinned is on screen now and gone once it stops.
+	if err := h.SetPinned(inst.ID, true); err != nil {
+		t.Fatalf("SetPinned: %v", err)
+	}
+	h.Refresh()
+	m.refresh()
+
 	m = sendFleet(m, key("a"))
 	m = m.readDir(filepath.Dir(inst.ConfigPath))
 
-	var cfgEntry int = -1
+	cfgEntry := -1
 	for i, e := range m.entries {
 		if e.IsConfig {
 			cfgEntry = i
@@ -723,8 +732,8 @@ func TestFleetBrowserFlagsAlreadyAdded(t *testing.T) {
 	if cfgEntry < 0 {
 		t.Fatal("the running project's config was not listed")
 	}
-	if !m.entries[cfgEntry].Added {
-		t.Error("a config already in the dashboard was not flagged")
+	if !m.entries[cfgEntry].Added || !m.entries[cfgEntry].Pinned {
+		t.Fatalf("expected a pinned entry, got %+v", m.entries[cfgEntry])
 	}
 
 	m.browseSel = cfgEntry
@@ -747,5 +756,87 @@ func TestHintsTrimToWidth(t *testing.T) {
 	}
 	if strings.Contains(narrow, "ccc") {
 		t.Errorf("narrow hints kept an entry they had no room for: %q", narrow)
+	}
+}
+
+// A project that is catalogued but unpinned is hidden from the dashboard while
+// stopped. The picker used to refuse it as "already in the list" — telling the
+// user it was in a list they could plainly see it wasn't in. Adding it now
+// means pinning it, which is what makes it appear.
+func TestFleetBrowserAddsAHiddenProject(t *testing.T) {
+	root := t.TempDir()
+	m, h := newFleet(t, 100, 30, func(r string) {
+		fleetProject(t, r, "alpha", "web")
+	})
+
+	// Catalogued by `pairin up` (auto), not running, so not on screen.
+	dir := filepath.Join(root, "hidden")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cfg := filepath.Join(dir, ".pairinrc.toml")
+	body := "[project]\nname = \"Was Hidden\"\n\n[[services]]\nname = \"web\"\ncmd = \"true\"\ndir = \".\"\n"
+	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cat, err := catalog.Load()
+	if err != nil {
+		t.Fatalf("catalog load: %v", err)
+	}
+	if _, err := cat.Add(catalog.Project{Display: "Was Hidden", Config: cfg, Auto: true}); err != nil {
+		t.Fatalf("catalog add: %v", err)
+	}
+	if err := cat.Save(); err != nil {
+		t.Fatalf("catalog save: %v", err)
+	}
+	h.Refresh()
+	m.refresh()
+
+	// Confirm the premise: it is not on screen.
+	for _, v := range h.Snapshot() {
+		if v.ConfigPath == cfg {
+			t.Fatal("setup: the unpinned stopped project is already listed")
+		}
+	}
+
+	m = sendFleet(m, key("a"))
+	m = m.readDir(dir)
+
+	var idx = -1
+	for i, e := range m.entries {
+		if e.IsConfig {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		t.Fatal("the config was not listed")
+	}
+	if !m.entries[idx].Added || m.entries[idx].Pinned {
+		t.Fatalf("expected a catalogued-but-unpinned entry, got %+v", m.entries[idx])
+	}
+
+	m.browseSel = idx
+	model, _ := m.choose()
+	m = model.(FleetModel)
+
+	if m.statusErr {
+		t.Fatalf("adding a hidden project was refused: %s", m.status)
+	}
+	if !strings.Contains(m.status, "pinned") {
+		t.Errorf("status = %q, want it to say the project was pinned", m.status)
+	}
+
+	// And now it is actually on screen.
+	found := false
+	for _, v := range h.Snapshot() {
+		if v.ConfigPath == cfg {
+			found = true
+			if !v.Pinned {
+				t.Error("project is listed but still unpinned")
+			}
+		}
+	}
+	if !found {
+		t.Error("the project is still missing from the dashboard after being added")
 	}
 }

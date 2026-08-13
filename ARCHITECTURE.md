@@ -253,6 +253,13 @@ quitting: a mode opened by accident should not be able to quit out from under yo
 and then never start. Entries added this way are pinned, since going looking for a project is the
 same deliberate signal `pairin register` carries.
 
+**Catalogue membership and dashboard visibility are different questions**, and the picker has to
+answer the second one. An unpinned, stopped project has a catalog record but is not shown, so the
+picker offers it (marked `unpinned — enter to pin`) rather than refusing it as already added — which
+would tell the user it is in a list they can plainly see it isn't in. Only a *pinned* config is
+refused. `browse.Entry` therefore carries both `Added` and `Pinned`, and `AddProject` pins an
+existing entry rather than treating it as a no-op.
+
 ### Pinning
 
 Catalog entries carry an `Auto` flag, and the dashboard shows a stopped project only when it is

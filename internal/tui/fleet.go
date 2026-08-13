@@ -310,17 +310,22 @@ func (m FleetModel) closeBrowser() FleetModel {
 // readDir lists a directory into the picker, flagging configs already in the
 // catalog so they aren't added twice.
 func (m FleetModel) readDir(dir string) FleetModel {
-	known := map[string]bool{}
+	type membership struct{ added, pinned bool }
+	known := map[string]membership{}
 	for _, inst := range m.hub.Snapshot() {
-		known[inst.ConfigPath] = true
+		known[inst.ConfigPath] = membership{true, inst.Pinned}
 	}
+	// The catalog is authoritative for pin state, so it goes last.
 	if cat, err := catalog.Load(); err == nil {
 		for _, p := range cat.Projects {
-			known[p.Config] = true
+			known[p.Config] = membership{true, p.Pinned()}
 		}
 	}
 
-	entries, err := browse.Read(dir, func(path string) bool { return known[path] })
+	entries, err := browse.Read(dir, func(path string) (bool, bool) {
+		k := known[path]
+		return k.added, k.pinned
+	})
 	if err != nil {
 		m.status = fmt.Sprintf("cannot open %s: %v", dir, err)
 		m.statusErr = true
@@ -396,17 +401,26 @@ func (m FleetModel) choose() (tea.Model, tea.Cmd) {
 		return m.readDir(e.Path), nil
 	}
 
-	if e.Added {
-		return m.fail(fmt.Sprintf("%s is already in the list", displayOr(e.Project, e.Name))), nil
+	label := displayOr(e.Project, e.Name)
+
+	// Only refuse when it is genuinely on screen already. A catalogued but
+	// unpinned project isn't, so adding it means pinning it.
+	if e.Added && e.Pinned {
+		return m.fail(fmt.Sprintf("%s is already in the list", label)), nil
 	}
+
 	name, err := m.hub.AddProject(e.Path)
 	if err != nil {
 		return m.fail(fmt.Sprintf("could not add %s: %v", e.Name, err)), nil
 	}
 
+	verb := "added"
+	if e.Added {
+		verb = "pinned"
+	}
 	m = m.closeBrowser()
 	m.refresh()
-	return m.note(fmt.Sprintf("added %s — start it with s, or `pairin up %s`", displayOr(e.Project, e.Name), name)), nil
+	return m.note(fmt.Sprintf("%s %s — start it with s, or `pairin up %s`", verb, label, name)), nil
 }
 
 func displayOr(project, fallback string) string {
@@ -494,7 +508,7 @@ func (m FleetModel) renderEntry(e browse.Entry, selected bool) string {
 	name := e.Name
 	style := lipgloss.NewStyle()
 	switch {
-	case e.IsConfig && e.Added:
+	case e.IsConfig && e.Added && e.Pinned:
 		style = style.Faint(true)
 	case e.IsConfig:
 		style = style.Foreground(lipgloss.Color("6"))
@@ -507,8 +521,13 @@ func (m FleetModel) renderEntry(e browse.Entry, selected bool) string {
 	switch {
 	case e.IsConfig:
 		note = e.Project
-		if e.Added {
+		switch {
+		case e.Added && e.Pinned:
 			note = strings.TrimSpace(note + "  already added")
+		case e.Added:
+			// Known but not pinned: either hidden right now, or on screen only
+			// while it runs. Either way "already added" would be misleading.
+			note = strings.TrimSpace(note + "  unpinned — enter to pin")
 		}
 	case e.IsDir && e.Configs > 0:
 		note = plural(e.Configs, "config")
