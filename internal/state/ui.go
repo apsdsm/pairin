@@ -19,6 +19,11 @@ type UI struct {
 	// Stored as a string so the file stays readable and a future style can be
 	// added without renumbering anything.
 	CellStyle string `json:"cell_style,omitempty"`
+
+	// BrowseDir is where the project picker last was. Projects tend to live
+	// near each other, so the next one you add is usually a keystroke or two
+	// from the last.
+	BrowseDir string `json:"browse_dir,omitempty"`
 }
 
 // UIPath returns the file's location.

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/apsdsm/pairin/internal/catalog"
 	"github.com/apsdsm/pairin/internal/config"
 	"github.com/apsdsm/pairin/internal/control"
 	"github.com/apsdsm/pairin/internal/hub"
@@ -556,5 +557,195 @@ func TestLegendTrimsByEntry(t *testing.T) {
 	// What survives must still be intact, not a half-drawn entry.
 	if !strings.Contains(narrow, "up") {
 		t.Errorf("narrow key lost the leading entry: %q", narrow)
+	}
+}
+
+// The picker takes the bottom of the screen rather than all of it, so the
+// dashboard it's adding to stays in view.
+func TestFleetBrowserIsABottomPanel(t *testing.T) {
+	root := t.TempDir()
+	m, _ := newFleet(t, 100, 30, func(r string) {
+		fleetProject(t, r, "alpha", "web", "worker")
+	})
+	// Somewhere with a config to find.
+	if err := os.MkdirAll(filepath.Join(root, "elsewhere"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	before := strings.Split(m.View(), "\n")
+	m = sendFleet(m, key("a"))
+	if !m.browsing {
+		t.Fatal("'a' did not open the picker")
+	}
+
+	after := strings.Split(m.View(), "\n")
+	if len(after) != len(before) {
+		t.Errorf("view changed height with the picker open: %d -> %d", len(before), len(after))
+	}
+	// The dashboard is still there above it.
+	if !strings.Contains(after[2], "alpha") {
+		t.Errorf("project heading vanished when the picker opened: %q", after[2])
+	}
+	// And the panel announces itself with a rule.
+	joined := strings.Join(after, "\n")
+	if !strings.Contains(joined, "add a project") {
+		t.Errorf("picker has no heading:\n%s", joined)
+	}
+
+	m = sendFleet(m, key("esc"))
+	if m.browsing {
+		t.Error("esc did not close the picker")
+	}
+}
+
+// Navigating into a directory and adding the config found there.
+func TestFleetBrowserAddsAConfig(t *testing.T) {
+	root := t.TempDir()
+	m, h := newFleet(t, 100, 30, func(r string) {
+		fleetProject(t, r, "alpha", "web")
+	})
+
+	// A project sitting somewhere the dashboard doesn't know about.
+	dir := filepath.Join(root, "newproj")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cfg := filepath.Join(dir, ".pairinrc.toml")
+	body := "[project]\nname = \"Brand New\"\n\n[[services]]\nname = \"web\"\ncmd = \"true\"\ndir = \".\"\n"
+	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	// Open the picker straight at that directory.
+	m = sendFleet(m, key("a"))
+	m = m.readDir(dir)
+
+	// The config is listed first, named by its project.
+	if len(m.entries) < 2 {
+		t.Fatalf("listing is too short: %+v", m.entries)
+	}
+	cfgEntry := m.entries[1]
+	if !cfgEntry.IsConfig || cfgEntry.Project != "Brand New" {
+		t.Fatalf("expected the config named by project, got %+v", cfgEntry)
+	}
+
+	m.browseSel = 1
+	model, _ := m.choose()
+	m = model.(FleetModel)
+
+	if m.statusErr {
+		t.Fatalf("adding failed: %s", m.status)
+	}
+	if m.browsing {
+		t.Error("picker stayed open after adding")
+	}
+	if !strings.Contains(m.status, "Brand New") {
+		t.Errorf("status = %q, want it to name the project", m.status)
+	}
+
+	// It is in the catalog, pinned, and the hub can see it.
+	cat, err := catalog.Load()
+	if err != nil {
+		t.Fatalf("catalog load: %v", err)
+	}
+	entry, ok := cat.ByConfig(cfg)
+	if !ok {
+		t.Fatal("config was not added to the catalog")
+	}
+	if !entry.Pinned() {
+		t.Error("a project added deliberately came out unpinned")
+	}
+
+	found := false
+	for _, v := range h.Snapshot() {
+		if v.ConfigPath == cfg {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the added project is not in the dashboard")
+	}
+}
+
+// Adding something that isn't a valid pairin config must fail rather than put
+// an entry in the catalog that can never start.
+func TestFleetBrowserRejectsABadConfig(t *testing.T) {
+	root := t.TempDir()
+	m, _ := newFleet(t, 100, 30, func(r string) {
+		fleetProject(t, r, "alpha", "web")
+	})
+
+	dir := filepath.Join(root, "broken")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cfg := filepath.Join(dir, ".pairinrc.toml")
+	// Depends on a service that doesn't exist: parses, but won't validate.
+	body := "[project]\nname = \"Broken\"\n\n[[services]]\nname = \"web\"\ncmd = \"true\"\ndepends_on = [\"ghost\"]\n"
+	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	m = sendFleet(m, key("a"))
+	m = m.readDir(dir)
+	m.browseSel = 1
+	model, _ := m.choose()
+	m = model.(FleetModel)
+
+	if !m.statusErr {
+		t.Errorf("adding an invalid config succeeded: %q", m.status)
+	}
+	cat, _ := catalog.Load()
+	if _, ok := cat.ByConfig(cfg); ok {
+		t.Error("an invalid config was added to the catalog anyway")
+	}
+}
+
+// Configs already in the catalog are flagged and refuse to be added twice.
+func TestFleetBrowserFlagsAlreadyAdded(t *testing.T) {
+	m, _ := newFleet(t, 100, 30, func(r string) {
+		fleetProject(t, r, "alpha", "web")
+	})
+
+	inst, _, ok := m.selection()
+	if !ok {
+		t.Fatal("nothing selected")
+	}
+	m = sendFleet(m, key("a"))
+	m = m.readDir(filepath.Dir(inst.ConfigPath))
+
+	var cfgEntry int = -1
+	for i, e := range m.entries {
+		if e.IsConfig {
+			cfgEntry = i
+		}
+	}
+	if cfgEntry < 0 {
+		t.Fatal("the running project's config was not listed")
+	}
+	if !m.entries[cfgEntry].Added {
+		t.Error("a config already in the dashboard was not flagged")
+	}
+
+	m.browseSel = cfgEntry
+	model, _ := m.choose()
+	m = model.(FleetModel)
+	if !m.statusErr || !strings.Contains(m.status, "already") {
+		t.Errorf("re-adding said %q, want it refused", m.status)
+	}
+}
+
+// Key hints grow every time a key is added; they trim rather than overflow.
+func TestHintsTrimToWidth(t *testing.T) {
+	full := hints(0, "aaa", "bbb", "ccc")
+	if !strings.Contains(full, "ccc") {
+		t.Fatalf("unlimited hints dropped an entry: %q", full)
+	}
+	narrow := hints(9, "aaa", "bbb", "ccc")
+	if w := lipglossWidth(narrow); w > 9 {
+		t.Errorf("hints are %d wide, want at most 9: %q", w, narrow)
+	}
+	if strings.Contains(narrow, "ccc") {
+		t.Errorf("narrow hints kept an entry they had no room for: %q", narrow)
 	}
 }

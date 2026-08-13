@@ -597,6 +597,18 @@ func renderLegend(items []legendItem, width int) string {
 	return strings.Join(out, strings.Repeat(" ", gap))
 }
 
+// hints renders a row of key hints, dropping trailing ones that don't fit.
+// The list grows every time a key is added, so pass them in descending order of
+// how much the reader needs them.
+func hints(width int, parts ...string) string {
+	items := make([]legendItem, 0, len(parts))
+	for _, p := range parts {
+		r := FooterStyle.Render(p)
+		items = append(items, legendItem{rendered: r, width: lipgloss.Width(r)})
+	}
+	return renderLegend(items, width)
+}
+
 // GridLegend is the key to the service glyphs, trimmed to the given width.
 // A width of zero means no limit.
 func GridLegend(width int) string {

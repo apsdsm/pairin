@@ -9,9 +9,12 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/apsdsm/pairin/internal/browse"
+	"github.com/apsdsm/pairin/internal/catalog"
 	"github.com/apsdsm/pairin/internal/control"
 	"github.com/apsdsm/pairin/internal/hub"
 	"github.com/apsdsm/pairin/internal/process"
+	"github.com/apsdsm/pairin/internal/state"
 )
 
 // fleetRefreshInterval is how often the dashboard re-reads the catalog and the
@@ -45,6 +48,13 @@ type FleetModel struct {
 
 	filtering   bool
 	filterInput string
+
+	// Project picker. It takes over the bottom of the screen rather than the
+	// whole of it, so the dashboard it's adding to stays in view.
+	browsing  bool
+	browseDir string
+	entries   []browse.Entry
+	browseSel int
 
 	// status is a transient line for the result of an action, cleared on the
 	// next keystroke.
@@ -115,6 +125,9 @@ func (m FleetModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m FleetModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.filtering {
 		return m.handleFilterKey(msg)
+	}
+	if m.browsing {
+		return m.handleBrowseKey(msg)
 	}
 
 	m.status = ""
@@ -213,6 +226,12 @@ func (m FleetModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "S":
 		return m.stopProject()
 
+	case "a":
+		if !m.zoomed {
+			return m.openBrowser(), nil
+		}
+		return m, nil
+
 	case "p":
 		return m.togglePin()
 
@@ -259,6 +278,251 @@ func (m FleetModel) handleFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// ----- project picker -----
+
+// openBrowser opens the picker where it was last left.
+func (m FleetModel) openBrowser() FleetModel {
+	dir := state.LoadUI().BrowseDir
+	if dir == "" {
+		dir = browse.Home()
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		dir = browse.Home()
+	}
+
+	m.browsing = true
+	m.status = ""
+	m.statusErr = false
+	m = m.readDir(dir)
+	m.resize()
+	return m
+}
+
+func (m FleetModel) closeBrowser() FleetModel {
+	m.browsing = false
+	m.entries = nil
+	m.resize()
+	return m
+}
+
+// readDir lists a directory into the picker, flagging configs already in the
+// catalog so they aren't added twice.
+func (m FleetModel) readDir(dir string) FleetModel {
+	known := map[string]bool{}
+	for _, inst := range m.hub.Snapshot() {
+		known[inst.ConfigPath] = true
+	}
+	if cat, err := catalog.Load(); err == nil {
+		for _, p := range cat.Projects {
+			known[p.Config] = true
+		}
+	}
+
+	entries, err := browse.Read(dir, func(path string) bool { return known[path] })
+	if err != nil {
+		m.status = fmt.Sprintf("cannot open %s: %v", dir, err)
+		m.statusErr = true
+		return m
+	}
+
+	m.browseDir = dir
+	m.entries = entries
+	m.browseSel = 0
+
+	ui := state.LoadUI()
+	ui.BrowseDir = dir
+	_ = state.SaveUI(ui)
+	return m
+}
+
+func (m FleetModel) handleBrowseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "a", "q", "ctrl+c":
+		// 'q' closes the picker rather than the dashboard: a mode you opened by
+		// accident shouldn't be able to quit out from under you.
+		return m.closeBrowser(), nil
+
+	case "up", "k":
+		if m.browseSel > 0 {
+			m.browseSel--
+		}
+		return m, nil
+
+	case "down", "j":
+		if m.browseSel < len(m.entries)-1 {
+			m.browseSel++
+		}
+		return m, nil
+
+	case "left", "h":
+		return m.ascend(), nil
+
+	case "right", "l", "enter":
+		return m.choose()
+	}
+	return m, nil
+}
+
+func (m FleetModel) ascend() FleetModel {
+	parent := filepath.Dir(m.browseDir)
+	if parent == m.browseDir {
+		return m
+	}
+	from := filepath.Base(m.browseDir)
+	m = m.readDir(parent)
+	// Land on the directory just left, so going up and back down is symmetric.
+	for i, e := range m.entries {
+		if e.IsDir && !e.IsParent && strings.TrimSuffix(e.Name, string(filepath.Separator)) == from {
+			m.browseSel = i
+			break
+		}
+	}
+	return m
+}
+
+// choose descends into a directory, or adds the selected config.
+func (m FleetModel) choose() (tea.Model, tea.Cmd) {
+	if m.browseSel < 0 || m.browseSel >= len(m.entries) {
+		return m, nil
+	}
+	e := m.entries[m.browseSel]
+
+	if e.IsParent {
+		return m.ascend(), nil
+	}
+	if e.IsDir {
+		return m.readDir(e.Path), nil
+	}
+
+	if e.Added {
+		return m.fail(fmt.Sprintf("%s is already in the list", displayOr(e.Project, e.Name))), nil
+	}
+	name, err := m.hub.AddProject(e.Path)
+	if err != nil {
+		return m.fail(fmt.Sprintf("could not add %s: %v", e.Name, err)), nil
+	}
+
+	m = m.closeBrowser()
+	m.refresh()
+	return m.note(fmt.Sprintf("added %s — start it with s, or `pairin up %s`", displayOr(e.Project, e.Name), name)), nil
+}
+
+func displayOr(project, fallback string) string {
+	if project != "" {
+		return project
+	}
+	return fallback
+}
+
+// browserHeight is how much of the screen the picker takes: enough for its
+// entries, never more than half the content area.
+func (m FleetModel) browserHeight() int {
+	if !m.browsing {
+		return 0
+	}
+	const chrome = 2 // separator rule and the path line
+
+	available := m.height - fleetChromeLines
+	max := available / 2
+	if max < 6 {
+		max = 6
+	}
+
+	want := len(m.entries) + chrome
+	if want > max {
+		want = max
+	}
+	if want < 4 {
+		want = 4
+	}
+	if want > available {
+		want = available
+	}
+	return want
+}
+
+// renderBrowser draws the picker panel, separated from the dashboard above it
+// by a titled rule.
+func (m FleetModel) renderBrowser(height int) string {
+	// Built as separate pieces rather than sliced: the rule is box-drawing
+	// characters, three bytes each, so byte offsets cut through them.
+	title := " add a project "
+	const lead = "──"
+	trail := ""
+	if pad := m.width - lipgloss.Width(title) - lipgloss.Width(lead); pad > 0 {
+		trail = strings.Repeat("─", pad)
+	}
+
+	lines := []string{DimStyle.Render(lead) + HeaderStyle.Render(title) + DimStyle.Render(trail)}
+	lines = append(lines, DimStyle.Render(shortenPath(m.browseDir)))
+
+	rows := height - len(lines)
+	if rows < 1 {
+		rows = 1
+	}
+
+	// Keep the selection in view, derived from the selection rather than
+	// carried between renders — View works on a copy of the model.
+	start := 0
+	if m.browseSel >= rows {
+		start = m.browseSel - rows + 1
+	}
+	if max := len(m.entries) - rows; start > max {
+		start = max
+	}
+	if start < 0 {
+		start = 0
+	}
+
+	for i := start; i < len(m.entries) && len(lines) < height; i++ {
+		lines = append(lines, m.renderEntry(m.entries[i], i == m.browseSel))
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m FleetModel) renderEntry(e browse.Entry, selected bool) string {
+	marker := "  "
+	if selected {
+		marker = "› "
+	}
+
+	name := e.Name
+	style := lipgloss.NewStyle()
+	switch {
+	case e.IsConfig && e.Added:
+		style = style.Faint(true)
+	case e.IsConfig:
+		style = style.Foreground(lipgloss.Color("6"))
+	case selected:
+		style = style.Bold(true)
+	}
+
+	// The right-hand note: what a config is, or how many a directory holds.
+	note := ""
+	switch {
+	case e.IsConfig:
+		note = e.Project
+		if e.Added {
+			note = strings.TrimSpace(note + "  already added")
+		}
+	case e.IsDir && e.Configs > 0:
+		note = plural(e.Configs, "config")
+	}
+
+	left := marker + style.Render(name)
+	if note == "" {
+		return left
+	}
+	gap := m.width - lipgloss.Width(left) - lipgloss.Width(note) - 1
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + DimStyle.Render(note)
 }
 
 // selection resolves the highlighted cell back to a project and service.
@@ -481,7 +745,7 @@ func (m *FleetModel) resize() {
 	if m.width == 0 || m.height == 0 {
 		return
 	}
-	available := m.height - fleetChromeLines
+	available := m.height - fleetChromeLines - m.browserHeight()
 	if available < 1 {
 		available = 1
 	}
@@ -506,8 +770,12 @@ func (m FleetModel) View() string {
 		content = m.pane.RenderFocus()
 	}
 	// Pad to a fixed height so the footer doesn't walk up and down.
-	if pad := (m.height - fleetChromeLines) - (strings.Count(content, "\n") + 1); pad > 0 {
+	panel := m.browserHeight()
+	if pad := (m.height - fleetChromeLines - panel) - (strings.Count(content, "\n") + 1); pad > 0 {
 		content += strings.Repeat("\n", pad)
+	}
+	if panel > 0 {
+		content += "\n" + m.renderBrowser(panel)
 	}
 
 	return body + content + "\n" + m.renderStatus() + "\n" + m.renderKeys()
@@ -570,12 +838,16 @@ func (m FleetModel) renderStatus() string {
 // status message is showing, on its own line.
 func (m FleetModel) renderKeys() string {
 	switch {
+	case m.browsing:
+		return hints(m.width, "↑↓ move", "enter open/add", "← up", "esc close")
 	case m.filtering:
-		return FooterStyle.Render("enter accept  esc clear")
+		return hints(m.width, "enter accept", "esc clear")
 	case m.zoomed:
-		return FooterStyle.Render("↑↓ scroll  r restart  c clear logs  z back  q quit")
+		return hints(m.width, "↑↓ scroll", "r restart", "c clear logs", "z back", "q quit")
 	default:
-		return FooterStyle.Render("↑↓←→ move  z logs  r restart  x stop  s start  S down  c clear  p pin  b cells  / filter  q quit")
+		return hints(m.width,
+			"↑↓←→", "z logs", "r restart", "x stop", "s start", "S down",
+			"a add", "p pin", "q quit", "c clear", "b cells", "/ filter")
 	}
 }
 

@@ -29,6 +29,7 @@ cmd/
   supervisor.go                # Hidden `pairin supervisor`: the detached background worker
   version.go                   # Version constant + `pairin version`
 internal/
+  browse/browse.go             # Directory listing for the dashboard's project picker
   catalog/catalog.go           # User's registered projects: $XDG_CONFIG_HOME/pairin/projects.toml
   hub/hub.go                   # Connections to every supervisor on the host; tagged events, per-instance reconnect
   launcher/launcher.go         # Spawning detached supervisors; shared by the CLI and the dashboard

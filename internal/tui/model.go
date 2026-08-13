@@ -667,14 +667,14 @@ func (m DashboardModel) renderStatus() string {
 // renderKeys is the bottom line, and stays visible while a status is showing.
 func (m DashboardModel) renderKeys() string {
 	if m.filtering {
-		return FooterStyle.Render("enter accept  esc clear")
+		return hints(m.width, "enter accept", "esc clear")
 	}
 	switch m.view {
 	case viewGrid:
-		return FooterStyle.Render("↑↓←→ move  z zoom  r restart  c clear logs  b cells  / filter  v split  q detach  d down")
+		return hints(m.width, "↑↓←→", "z zoom", "r restart", "q detach", "d down", "c clear", "b cells", "/ filter", "v split")
 	case viewFocus:
-		return FooterStyle.Render("↑↓ scroll  r restart  c clear logs  z back  q detach  d down")
+		return hints(m.width, "↑↓ scroll", "r restart", "z back", "q detach", "d down", "c clear logs")
 	default:
-		return FooterStyle.Render("tab cycle  r restart  c clear logs  z zoom  v grid  q detach  d down")
+		return hints(m.width, "tab cycle", "r restart", "z zoom", "q detach", "d down", "c clear", "v grid")
 	}
 }

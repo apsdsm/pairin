@@ -116,6 +116,34 @@ A project with no services to list — usually one whose config file has been mo
 gets a selectable `(no services)` placeholder, so it can be pinned, started, or unpinned like any
 other. `pairin projects` shows the pin state of everything in the catalog.
 
+### Adding a project from the dashboard
+
+`a` opens a project picker in the bottom half of the screen, leaving the dashboard visible above it:
+
+```
+◆ Acme API  ~/Code/acme-api  sup 2861956  1m
+ ● postgres             ● redis                ● api
+
+── add a project ──────────────────────────────────────────────────────────────
+~/Code
+› ../
+  beholder/
+  jjc2_main/                                                          2 configs
+  jjc_main/                                                            1 config
+  lgc_main/                                                           2 configs
+
+↑↓ move  enter open/add  ← up  esc close
+```
+
+It lists directories and pairin configs, nothing else. The count on the right says how many configs
+each directory holds, so it's clear which are worth opening. Inside a project, configs are labelled
+with their `[project].name` rather than just a filename — which matters when a project keeps
+`.pairinrc.toml` and `.pairinrc.localdev.toml` side by side — and anything already in the catalog is
+flagged so it can't be added twice.
+
+`enter` on a directory descends, `←` goes up, `enter` on a config adds it (pinned) and closes the
+picker. The directory you were last in is remembered for next time.
+
 ### Cell styles
 
 `b` cycles how much room each service gets — densest first:
@@ -159,6 +187,7 @@ another terminal appear on their own, and supervisors that go away are dropped.
 | `x`            | Stop the selected service                                  |
 | `s`            | Start the selected service, or the whole project if it's down |
 | `S`            | Shut down the selected project                             |
+| `a`            | Add a project — opens a picker in the bottom of the screen |
 | `p`            | Pin or unpin the selected project (pinned = always listed) |
 | `c` / `C`      | Clear the selected service's logs / the whole project's    |
 | `b`            | Cycle cell style: plain → boxed → cards                    |

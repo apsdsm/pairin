@@ -19,6 +19,9 @@ internal/
   config/
     config.go                     TOML config loading, dir resolution, validation
     config_test.go                Validation tests (deps, cycles, restart policies)
+  browse/
+    browse.go                     Directory listing for the project picker: dirs, configs, counts
+    browse_test.go                Ordering, project names, config counts, skip list
   catalog/
     catalog.go                    Registered projects: load/save, name derivation, prefix lookup
     catalog_test.go               Slugs, unique names, idempotent Add, ambiguous lookup
@@ -227,6 +230,28 @@ from the cwd. `pairin`, `up`, `attach` and `down` all route through it.
 Lookup order inside `Catalog.Find` is exact name → exact config path → unique name prefix. An
 ambiguous prefix returns `ErrAmbiguous` rather than picking one: starting the wrong project's
 services isn't a mistake the user can undo by pressing ctrl-C.
+
+### The project picker (`a`)
+
+`internal/browse` lists a directory as directories plus `.pairinrc*.toml` files and nothing else —
+it is not a general file browser, because the only reason to be looking is to find a config. Two
+things make browsing bearable rather than tedious, and both cost a `readdir` or a small file read:
+each directory carries a count of the configs inside it, so it's clear which are worth opening; and
+each config carries its `[project].name`, so the choice is made by project rather than by filename.
+Config counts stop after `maxProbes` directories rather than making the user wait on a huge tree.
+
+`ProjectName` deliberately avoids `config.Load`: a config with an invalid service definition should
+still be *listed* with its name, or it becomes impossible to find and fix.
+
+The panel takes the bottom of the screen rather than all of it, so the dashboard being added to stays
+in view. `browserHeight()` sizes it to its contents, capped at half the content area, and `resize()`
+subtracts it from the grid's height — the same fixed-chrome discipline as everywhere else, so nothing
+reflows. While it's open, keys route to `handleBrowseKey`, where `q` closes the picker rather than
+quitting: a mode opened by accident should not be able to quit out from under you.
+
+`Hub.AddProject` loads the config before writing a catalog entry, so an invalid one can't be added
+and then never start. Entries added this way are pinned, since going looking for a project is the
+same deliberate signal `pairin register` carries.
 
 ### Pinning
 
