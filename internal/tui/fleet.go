@@ -437,6 +437,7 @@ func (m *FleetModel) refresh() {
 	groups := make([]GridGroup, 0, len(m.instances))
 	for _, inst := range m.instances {
 		grp := GridGroup{
+			Marker:   PinMarker(inst.Pinned),
 			Title:    inst.Label(),
 			Subtitle: instanceSubtitle(inst),
 		}
@@ -498,7 +499,7 @@ func (m FleetModel) View() string {
 
 	// The glyph key sits at the top, where it stays put. Below the grid it
 	// moved down the screen every time a project gained a row.
-	body := GridLegend() + "\n" + m.renderHeader() + "\n"
+	body := FleetLegend(m.width) + "\n" + m.renderHeader() + "\n"
 
 	content := m.grid.View()
 	if m.zoomed {
@@ -581,10 +582,8 @@ func (m FleetModel) renderKeys() string {
 // instanceSubtitle is the line beside a project's name: where it lives and what
 // state it's in.
 func instanceSubtitle(inst hub.InstanceView) string {
+	// Pin state is shown by the marker on the heading, not repeated here.
 	parts := []string{shortenPath(filepath.Dir(inst.ConfigPath))}
-	if inst.Pinned {
-		parts = append(parts, "📌")
-	}
 
 	switch inst.State {
 	case hub.StateConnected:
@@ -600,12 +599,6 @@ func instanceSubtitle(inst hub.InstanceView) string {
 		parts = append(parts, "unreachable")
 	default:
 		parts = append(parts, "stopped — press s to start")
-	}
-
-	if !inst.Pinned {
-		// Flagged so it isn't a surprise when the project drops off the list
-		// after being stopped. 'p' keeps it.
-		parts = append(parts, "unpinned")
 	}
 
 	return strings.Join(parts, "  ")

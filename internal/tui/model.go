@@ -585,7 +585,7 @@ func (m DashboardModel) View() string {
 	// than sliding down the screen as projects gain rows.
 	chrome := 3
 	if m.view == viewGrid {
-		b.WriteString(GridLegend())
+		b.WriteString(GridLegend(m.width))
 		b.WriteString("\n")
 		chrome++
 	}

@@ -65,6 +65,9 @@ func (c GridCell) key() string {
 
 // GridGroup is a titled set of cells — one project's worth.
 type GridGroup struct {
+	// Marker is drawn before the title, already styled by the caller. The grid
+	// doesn't know what it means — it only reserves the room.
+	Marker   string
 	Title    string
 	Subtitle string
 	// Note replaces the cells when there's nothing running to show, e.g. a
@@ -535,18 +538,84 @@ func statusGlyph(c GridCell) (string, lipgloss.Style) {
 	}
 }
 
-// GridLegend is the key to the glyphs, rendered under the grid.
-func GridLegend() string {
-	parts := []string{
-		StatusRunning.Render("●") + DimStyle.Render(" up"),
-		StatusUnhealthy.Render("◍") + DimStyle.Render(" unhealthy"),
-		StatusStarting.Render("◐") + DimStyle.Render(" starting"),
-		StatusWaitingStyle.Render("⋯") + DimStyle.Render(" waiting"),
-		StatusRestarting.Render("⟳") + DimStyle.Render(" restarting"),
-		StatusCrashed.Render("✕") + DimStyle.Render(" crashed"),
-		StatusStopped.Render("○") + DimStyle.Render(" stopped"),
+// Pin markers, drawn at the start of a project's heading in the fleet view.
+const (
+	GlyphPinned   = "◆"
+	GlyphUnpinned = "◇"
+)
+
+// PinMarker returns the styled marker for a project's pin state.
+func PinMarker(pinned bool) string {
+	if pinned {
+		return PinnedStyle.Render(GlyphPinned)
 	}
-	return strings.Join(parts, "  ")
+	return UnpinnedStyle.Render(GlyphUnpinned)
+}
+
+// legendItem is one entry in the key.
+type legendItem struct {
+	rendered string
+	width    int
+}
+
+func legend(glyph string, style lipgloss.Style, label string) legendItem {
+	r := style.Render(glyph) + DimStyle.Render(" "+label)
+	return legendItem{rendered: r, width: lipgloss.Width(r)}
+}
+
+func statusLegend() []legendItem {
+	return []legendItem{
+		legend("●", StatusRunning, "up"),
+		legend("◍", StatusUnhealthy, "unhealthy"),
+		legend("◐", StatusStarting, "starting"),
+		legend("⋯", StatusWaitingStyle, "waiting"),
+		legend("⟳", StatusRestarting, "restarting"),
+		legend("✕", StatusCrashed, "crashed"),
+		legend("○", StatusStopped, "stopped"),
+	}
+}
+
+// renderLegend joins as many entries as fit the width, dropping from the end.
+// Truncating mid-string would cut through the styling escapes; dropping whole
+// entries keeps every one that is shown readable.
+func renderLegend(items []legendItem, width int) string {
+	const gap = 2
+
+	var out []string
+	used := 0
+	for i, it := range items {
+		add := it.width
+		if i > 0 {
+			add += gap
+		}
+		if width > 0 && used+add > width {
+			break
+		}
+		used += add
+		out = append(out, it.rendered)
+	}
+	return strings.Join(out, strings.Repeat(" ", gap))
+}
+
+// GridLegend is the key to the service glyphs, trimmed to the given width.
+// A width of zero means no limit.
+func GridLegend(width int) string {
+	return renderLegend(statusLegend(), width)
+}
+
+// FleetLegend adds the project-level pin markers to the service key.
+//
+// They get a wider gap rather than a divider character: the markers describe
+// projects while the glyphs before them describe services, and the break needs
+// to be visible — but a divider costs three columns, which was enough to push
+// the last entry off a 100-column terminal.
+func FleetLegend(width int) string {
+	pinned := legend(GlyphPinned, PinnedStyle, "pinned")
+	pinned.rendered = " " + pinned.rendered
+	pinned.width++
+
+	items := append(statusLegend(), pinned, legend(GlyphUnpinned, UnpinnedStyle, "unpinned"))
+	return renderLegend(items, width)
 }
 
 // renderCell draws one cell, padded to cellWide. The selected cell is marked
@@ -766,16 +835,24 @@ func (g Grid) View() string {
 // paths and status notes are both open-ended, so the line has to be clipped
 // rather than trusted to fit.
 func (g Grid) renderTitle(grp GridGroup) string {
-	name := grp.Title
-	if g.width > 0 && lipgloss.Width(name) > g.width {
-		name = truncate(name, g.width)
+	prefix := ""
+	prefixWidth := 0
+	if grp.Marker != "" {
+		prefix = grp.Marker + " "
+		prefixWidth = lipgloss.Width(prefix)
 	}
-	out := HeaderStyle.Render(name)
+
+	avail := g.width - prefixWidth
+	name := grp.Title
+	if avail > 0 && lipgloss.Width(name) > avail {
+		name = truncate(name, avail)
+	}
+	out := prefix + HeaderStyle.Render(name)
 
 	if grp.Subtitle == "" {
 		return out
 	}
-	room := g.width - lipgloss.Width(name) - 2
+	room := g.width - prefixWidth - lipgloss.Width(name) - 2
 	if g.width <= 0 {
 		room = lipgloss.Width(grp.Subtitle)
 	}

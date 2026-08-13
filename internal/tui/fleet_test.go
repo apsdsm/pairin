@@ -502,3 +502,59 @@ func TestFleetEmptyProjectIsSelectable(t *testing.T) {
 		t.Error("unpinned stopped project is still listed")
 	}
 }
+
+// The pin marker leads the project heading, and both states appear in the key.
+func TestFleetPinMarkers(t *testing.T) {
+	m, h := newFleet(t, 100, 30, func(root string) {
+		fleetProject(t, root, "alpha", "web")
+	})
+
+	view := m.View()
+	if !strings.Contains(view, GlyphUnpinned+" pinned") && !strings.Contains(view, "pinned") {
+		t.Errorf("key does not mention pinning:\n%s", strings.Split(view, "\n")[0])
+	}
+	key := strings.Split(view, "\n")[0]
+	for _, want := range []string{GlyphPinned + " pinned", GlyphUnpinned + " unpinned"} {
+		if !strings.Contains(key, want) {
+			t.Errorf("key is missing %q: %q", want, key)
+		}
+	}
+
+	// A running-but-unregistered project is unpinned, so its heading leads with
+	// the hollow diamond.
+	if !strings.Contains(view, GlyphUnpinned+" alpha") {
+		t.Errorf("unpinned heading is not marked:\n%s", view)
+	}
+
+	inst, _, _ := m.selection()
+	if err := h.SetPinned(inst.ID, true); err != nil {
+		t.Fatalf("SetPinned: %v", err)
+	}
+	h.Refresh()
+	m.refresh()
+
+	if got := m.View(); !strings.Contains(got, GlyphPinned+" alpha") {
+		t.Errorf("pinned heading is not marked:\n%s", got)
+	}
+}
+
+// A key too wide for the terminal drops whole entries rather than cutting
+// through the styling escapes mid-string.
+func TestLegendTrimsByEntry(t *testing.T) {
+	full := FleetLegend(0)
+	if !strings.Contains(full, "unpinned") {
+		t.Fatalf("unlimited key is missing entries: %q", full)
+	}
+
+	narrow := FleetLegend(30)
+	if w := lipglossWidth(narrow); w > 30 {
+		t.Errorf("key is %d wide, want at most 30: %q", w, narrow)
+	}
+	if strings.Contains(narrow, "unpinned") {
+		t.Errorf("narrow key kept a trailing entry it had no room for: %q", narrow)
+	}
+	// What survives must still be intact, not a half-drawn entry.
+	if !strings.Contains(narrow, "up") {
+		t.Errorf("narrow key lost the leading entry: %q", narrow)
+	}
+}

@@ -22,8 +22,13 @@ var (
 	StatusWaitingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))            // magenta
 	StatusRestarting   = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))            // yellow
 
-	StatusHealthy   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))          // green
-	StatusUnhealthy = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))          // yellow
+	StatusHealthy   = lipgloss.NewStyle().Foreground(lipgloss.Color("2")) // green
+	StatusUnhealthy = lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow
+
+	// Pin markers sit on project headings, not on services, so they use a
+	// colour no status glyph uses.
+	PinnedStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("6")) // cyan
+	UnpinnedStyle = lipgloss.NewStyle().Faint(true)
 
 	FooterStyle = lipgloss.NewStyle().Faint(true)
 )

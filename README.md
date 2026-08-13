@@ -76,31 +76,36 @@ To clear logs *without* stopping anything, press `c` in either TUI (or `C` in th
 `pairin dash` shows every project on the host at once — no tmux required:
 
 ```
+● up  ◍ unhealthy  ◐ starting  ⋯ waiting  ⟳ restarting  ✕ crashed  ○ stopped   ◆ pinned  ◇ unpinned
 pairin  5 projects (4 up) · 19 services · 15 running
 
-Acme API  ~/Code/acme-api  sup 2861956  1m
+◆ Acme API  ~/Code/acme-api  sup 2861956  1m
  ● postgres             ● redis                ● api
 
-Analytics  ~/Code/analytics  stopped — press s to start
+◆ Analytics  ~/Code/analytics  stopped — press s to start
 ›○ ingest               ○ rollup
 
-JJC2 (localdev)  ~/Code/jjc2_main  sup 2847550  7m
+◆ JJC2 (localdev)  ~/Code/jjc2_main  sup 2847550  7m
  ● db                   ● system_api           ● user_web             ● employee_web
  ● sysadmin_web         ● process_runner       ● docs
 
-LGC (localdev)  ~/Code/lgc_main  sup 2863604  35s
- ◍ db                   ⋯ api                  ● web                  ● cp
+◇ Temp Check  /tmp/tempproj  sup 1203880  40s
+ ● probe
 
-● up  ◍ unhealthy  ◐ starting  ⋯ waiting  ⟳ restarting  ✕ crashed  ○ stopped
-↑↓←→ move  z logs  r restart  x stop  s start  S shut down project  / filter  q quit
+restart web in Acme API
+↑↓←→ move  z logs  r restart  x stop  s start  S down  c clear  p pin  b cells  / filter  q quit
 ```
+
+The key sits on the first line where it stays put, and the bottom two lines are the last action's
+result and the keys — the result gets its own line rather than replacing them.
 
 Registered projects that aren't running appear greyed out with their service names read from their
 config, so you can see a project's shape before starting it — `s` starts it in place.
 
 ### Pinned and unpinned projects
 
-Running projects always appear. Stopped ones appear only if they're **pinned**, marked 📌:
+Running projects always appear. Stopped ones appear only if they are **pinned**. A project heading
+leads with `◆` when pinned and `◇` when not, and both are in the key at the top of the screen:
 
 - `pairin register` pins a project. Registering is a deliberate act, so it stays listed.
 - `pairin up` adds an unpinned entry. Starting a project once to check something shouldn't leave a
