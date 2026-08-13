@@ -329,6 +329,12 @@ func (h *Hub) supervise(ctx context.Context, id InstanceID) {
 	backoff := 250 * time.Millisecond
 	const maxBackoff = 5 * time.Second
 
+	// Read the project's shape from its config straight away, whatever state it
+	// is in. Dialing takes up to a snapshot timeout, and until it lands there is
+	// no client to read services from — a project would otherwise appear empty
+	// for those seconds every time the dashboard opened.
+	h.loadStubs(id)
+
 	for {
 		if ctx.Err() != nil {
 			return
@@ -405,7 +411,34 @@ func (h *Hub) attach(id InstanceID, client *control.Client) bool {
 	return true
 }
 
+// detach drops a connection, keeping what the supervisor was running so the
+// project holds its shape on screen.
+//
+// Without this the project blinks empty: Snapshot falls back to the config-read
+// stubs when there's no client, and those were never loaded while connected, so
+// there is a window with no services at all — which the dashboard renders as
+// "(no services)". Exactly when a supervisor goes away is when you're looking.
 func (h *Hub) detach(id InstanceID) {
+	h.mu.Lock()
+	inst, ok := h.instances[id]
+	var client *control.Client
+	if ok {
+		client = inst.client
+	}
+	h.mu.Unlock()
+
+	var last []process.ServiceView
+	if client != nil {
+		for _, svc := range client.ServiceList() {
+			v := svc.View()
+			// The supervisor is gone, so nothing it was running is running.
+			v.Status = process.StatusStopped
+			v.PID = 0
+			v.Healthy = false
+			last = append(last, v)
+		}
+	}
+
 	h.mu.Lock()
 	if inst, ok := h.instances[id]; ok {
 		if inst.client != nil {
@@ -413,6 +446,9 @@ func (h *Hub) detach(id InstanceID) {
 			inst.client = nil
 		}
 		inst.state = StateStopped
+		if len(last) > 0 {
+			inst.stubs = last
+		}
 	}
 	h.mu.Unlock()
 	h.notifyState(id, StateStopped, nil)

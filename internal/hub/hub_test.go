@@ -387,3 +387,96 @@ func TestSetPinnedKeepsAProject(t *testing.T) {
 		t.Errorf("hub does not report the project as pinned: %+v", v)
 	}
 }
+
+// A project must not blink empty when its supervisor goes away. Snapshot falls
+// back to config-read stubs when there's no client, and those aren't loaded
+// while connected — so the disconnect used to leave a window with no services,
+// which the dashboard renders as "(no services)".
+func TestServicesSurviveTheSupervisorStopping(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "cfg"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "st"))
+
+	p := project(t, root, "solo", "web", "worker")
+	srv := startSupervisor(t, p)
+	if err := state.Register(state.Instance{
+		SupervisorPID: os.Getpid(), ConfigPath: p, ProjectName: "solo",
+		SocketPath: state.SocketPath(p), StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	h := New()
+	defer h.Close()
+	h.Refresh()
+
+	waitFor(t, "connection", 10*time.Second, func() bool {
+		v := h.Snapshot()
+		return len(v) == 1 && v[0].State == StateConnected && len(v[0].Services) == 2
+	})
+
+	srv.Shutdown()
+	_ = os.Remove(state.LockPath(p))
+
+	// Detach directly rather than racing the supervise goroutine. The window
+	// this guards is microseconds wide, so a polling watcher would pass by luck
+	// as often as by correctness; this is the exact moment it opens.
+	h.detach(InstanceID(p))
+
+	v := h.Snapshot()
+	got := 0
+	if len(v) == 1 {
+		got = len(v[0].Services)
+	}
+	if got != 2 {
+		t.Fatalf("project reported %d services the moment its supervisor went away, want 2", got)
+	}
+
+	waitFor(t, "hub to notice the disconnect", 10*time.Second, func() bool {
+		v := h.Snapshot()
+		return len(v) == 1 && v[0].State == StateStopped
+	})
+
+	// What's left is the last known set, marked stopped.
+	for _, s := range h.Snapshot()[0].Services {
+		if s.Status != process.StatusStopped {
+			t.Errorf("%s status = %v after the supervisor went away, want stopped", s.Name, s.Status)
+		}
+		if s.PID != 0 {
+			t.Errorf("%s still reports pid %d", s.Name, s.PID)
+		}
+	}
+}
+
+// Services are known from the config before any connection is made, so a
+// project isn't empty for the seconds a dial can take.
+func TestServicesKnownBeforeConnecting(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "cfg"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "st"))
+
+	// Registered and marked running, but nothing is actually listening, so the
+	// dial will hang until it times out.
+	p := project(t, root, "slow", "web", "worker")
+	if err := state.EnsureDirs(p); err != nil {
+		t.Fatalf("state dirs: %v", err)
+	}
+	if err := os.WriteFile(state.LockPath(p), []byte(fmt.Sprint(os.Getpid())), 0o644); err != nil {
+		t.Fatalf("lockfile: %v", err)
+	}
+	if err := state.Register(state.Instance{
+		SupervisorPID: os.Getpid(), ConfigPath: p, ProjectName: "slow",
+		SocketPath: state.SocketPath(p), StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	h := New()
+	defer h.Close()
+	h.Refresh()
+
+	waitFor(t, "services read from the config", 5*time.Second, func() bool {
+		v := h.Snapshot()
+		return len(v) == 1 && len(v[0].Services) == 2
+	})
+}
