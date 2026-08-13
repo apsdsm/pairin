@@ -735,7 +735,6 @@ func (m *FleetModel) refresh() {
 				RestartCount: svc.RestartCount,
 				MaxRestarts:  svc.MaxRestarts,
 				PID:          svc.PID,
-				DependsOn:    svc.DependsOn,
 			})
 		}
 		if len(grp.Cells) == 0 {

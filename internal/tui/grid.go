@@ -52,7 +52,6 @@ type GridCell struct {
 	RestartCount int
 	MaxRestarts  int
 	PID          int
-	DependsOn    []string
 }
 
 // key is the cell's identity for selection purposes.
@@ -714,9 +713,10 @@ func cellDetail(c GridCell) string {
 		}
 		return fmt.Sprintf("retry #%d", c.RestartCount)
 	case process.StatusWaiting:
-		if len(c.DependsOn) > 0 {
-			return "waits " + c.DependsOn[0]
-		}
+		// Deliberately not "waits <dependency>": column width is sized to fit
+		// the widest detail, so an unbounded service name widened every cell —
+		// and then narrowed again as services started, reflowing the whole grid
+		// exactly when it was changing fastest.
 		return "waiting"
 	default:
 		return c.Status.String()
@@ -918,7 +918,6 @@ func GridCellsFor(svcs []*process.Service) []GridCell {
 			RestartCount: v.RestartCount,
 			MaxRestarts:  v.MaxRestarts,
 			PID:          v.PID,
-			DependsOn:    v.DependsOn,
 		})
 	}
 	return cells

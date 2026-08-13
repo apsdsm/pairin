@@ -377,3 +377,63 @@ func TestRememberedCellStyleToleratesGarbage(t *testing.T) {
 		t.Errorf("style from an unknown name = %s, want plain", got)
 	}
 }
+
+// Card detail is what a glyph can't say on its own, but column width is sized
+// to fit the widest detail — so an unbounded one widens every cell, and then
+// narrows again as services change state, reflowing the grid exactly when it
+// is changing fastest. Every detail is therefore short and fixed-ish.
+func TestCellDetailIsBounded(t *testing.T) {
+	const limit = 12 // "pid 1234567" is the longest realistic case
+
+	cells := []GridCell{
+		{Status: process.StatusRunning, PID: 1234567},
+		{Status: process.StatusRunning, HasHealth: true, Healthy: false},
+		{Status: process.StatusRunning},
+		{Status: process.StatusWaiting},
+		{Status: process.StatusStarting},
+		{Status: process.StatusRestarting, RestartCount: 3, MaxRestarts: 5},
+		{Status: process.StatusRestarting, RestartCount: 12},
+		{Status: process.StatusCrashed},
+		{Status: process.StatusStopped},
+	}
+	for _, c := range cells {
+		if got := cellDetail(c); lipglossWidth(got) > limit {
+			t.Errorf("detail for %v is %q (%d wide), want at most %d",
+				c.Status, got, lipglossWidth(got), limit)
+		}
+	}
+}
+
+// A service waiting on a long-named dependency must not widen the grid.
+func TestWaitingDetailDoesNotDependOnServiceNames(t *testing.T) {
+	short := GridCell{Name: "api", Status: process.StatusWaiting}
+	long := GridCell{Name: "api", Status: process.StatusWaiting}
+
+	if cellDetail(short) != "waiting" || cellDetail(long) != "waiting" {
+		t.Fatalf("waiting detail = %q / %q, want %q", cellDetail(short), cellDetail(long), "waiting")
+	}
+
+	// The rendered grid is the same width whether services are waiting or up.
+	build := func(status process.Status) int {
+		g := NewGrid()
+		g.SetSize(100, 40)
+		g.SetCellStyle(CellCard)
+		g.SetGroups([]GridGroup{{Cells: []GridCell{
+			{Name: "db", Status: status, PID: 1234567},
+			{Name: "jjc2_process_runner", Status: status, PID: 1234567},
+		}}})
+		widest := 0
+		for _, line := range strings.Split(g.View(), "\n") {
+			if w := lipglossWidth(line); w > widest {
+				widest = w
+			}
+		}
+		return widest
+	}
+
+	waiting, running := build(process.StatusWaiting), build(process.StatusRunning)
+	if waiting != running {
+		t.Errorf("grid is %d wide while waiting and %d while running; it reflows as services start",
+			waiting, running)
+	}
+}
