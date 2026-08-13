@@ -1,11 +1,14 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/apsdsm/pairin/internal/process"
+	"github.com/apsdsm/pairin/internal/state"
 )
 
 func cells(names ...string) []GridCell {
@@ -307,5 +310,70 @@ func TestGridStylesFitWidth(t *testing.T) {
 				t.Errorf("%s: line %d is %d wide, want at most 80: %q", style, i, w, line)
 			}
 		}
+	}
+}
+
+// The cell style is remembered across sessions: cycling with 'b' writes the
+// choice, and a fresh grid picks it up.
+func TestCellStyleIsRemembered(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
+	// Nothing stored yet: the default is the densest style, which always fits.
+	if got := RememberedCellStyle(); got != CellPlain {
+		t.Errorf("default style = %s, want plain", got)
+	}
+
+	g := gridOf(80, 20, "a", "b")
+	g.CycleCellStyle() // plain -> boxed
+	if got := RememberedCellStyle(); got != CellBoxed {
+		t.Errorf("after one cycle, remembered = %s, want boxed", got)
+	}
+
+	g.CycleCellStyle() // boxed -> cards
+	if got := RememberedCellStyle(); got != CellCard {
+		t.Errorf("after two cycles, remembered = %s, want cards", got)
+	}
+
+	// A grid built now opens in the style last used.
+	fresh := NewGrid()
+	fresh.SetCellStyle(RememberedCellStyle())
+	if got := fresh.CellStyle(); got != CellCard {
+		t.Errorf("fresh grid opened in %s, want cards", got)
+	}
+
+	// And cycling all the way round stores plain again rather than leaving a
+	// stale value behind.
+	g.CycleCellStyle() // cards -> plain
+	if got := RememberedCellStyle(); got != CellPlain {
+		t.Errorf("after three cycles, remembered = %s, want plain", got)
+	}
+}
+
+// A missing or unreadable preferences file must never stop a TUI from opening.
+func TestRememberedCellStyleToleratesGarbage(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", dir)
+
+	path, err := state.UIPath()
+	if err != nil {
+		t.Fatalf("UIPath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("this is not json"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if got := RememberedCellStyle(); got != CellPlain {
+		t.Errorf("style from a corrupt file = %s, want plain", got)
+	}
+
+	// An unknown style name falls back too, rather than rendering nothing.
+	if err := os.WriteFile(path, []byte(`{"cell_style":"hexagons"}`), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := RememberedCellStyle(); got != CellPlain {
+		t.Errorf("style from an unknown name = %s, want plain", got)
 	}
 }

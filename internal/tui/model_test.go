@@ -29,6 +29,10 @@ func (f *fakeBackend) RestartService(idx int) tea.Cmd {
 func newTestModel(t *testing.T, n int, width, height int) (DashboardModel, *fakeBackend) {
 	t.Helper()
 
+	// The model reads the remembered cell style on construction, so point it at
+	// a scratch state dir rather than at whatever the developer last used.
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+
 	be := &fakeBackend{}
 	cfgServices := make([]config.Service, n)
 	for i := 0; i < n; i++ {

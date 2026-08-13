@@ -113,12 +113,14 @@ cards    ┏━━━━━━━━━━━━━━┓ ╭──────�
          ┗━━━━━━━━━━━━━━┛ ╰──────────────╯ ╰──────────────╯
 ```
 
-**plain** fits the most on screen and is the default. **boxed** costs three lines per row instead of
-one. **cards** adds a second line carrying what the glyph can't say on its own — PID, which
-dependency a service is waiting on, how many restarts it has left. The selected cell takes a heavy
-border as well as the caret.
+**plain** fits the most on screen. **boxed** costs three lines per row instead of one. **cards**
+adds a second line carrying what the glyph can't say on its own — PID, which dependency a service is
+waiting on, how many restarts it has left. The selected cell takes a heavy border as well as the
+caret.
 
-The same key works in the per-project grid view.
+Your choice is remembered: whichever style you were last in is the one the next `pairin dash` opens
+in. It's stored in `$XDG_STATE_HOME/pairin/ui.json` (default `~/.local/state/pairin/ui.json`) and
+shared with the per-project grid view, where the same key works.
 
 `z` on any service opens its logs full-screen. Only that one service streams its output while you're
 looking at it; the rest of the host's logs stay off the wire.

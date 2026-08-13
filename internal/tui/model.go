@@ -106,11 +106,14 @@ func NewDashboardModel(cfg *config.Config, mgr Backend) DashboardModel {
 		panes[i].PreloadHistory(preloadHistoryLines)
 	}
 
+	grid := NewGrid()
+	grid.SetCellStyle(RememberedCellStyle())
+
 	model := DashboardModel{
 		cfg:        cfg,
 		mgr:        mgr,
 		panes:      panes,
-		grid:       NewGrid(),
+		grid:       grid,
 		view:       viewSplit,
 		prevView:   viewSplit,
 		retryDelay: reconnectMinDelay,

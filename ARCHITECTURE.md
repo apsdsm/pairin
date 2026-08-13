@@ -41,6 +41,7 @@ internal/
   state/
     state.go                      .pairin/state.json + supervisor.pid + IsProcessAlive helpers
     registry.go                   Host-wide instance registry under $XDG_STATE_HOME/pairin/instances/
+    ui.go                         Remembered interface state (grid cell style)
     logfile.go                    Per-service log paths and 10 MiB rotation threshold
   tui/
     model.go                      Bubble Tea model: keys, layout, split/grid/focus views; uses Backend interface
@@ -199,6 +200,11 @@ Two different lists, deliberately kept apart:
 | Location | `$XDG_CONFIG_HOME/pairin/projects.toml` | `$XDG_STATE_HOME/pairin/instances/<hash>.json` |
 | Written by | `pairin register`, and `up` (auto) | the supervisor, on start |
 | Lifetime | curated; survives cleanup; hand-editable | derived; self-cleans when a PID dies |
+
+A third file, `$XDG_STATE_HOME/pairin/ui.json`, remembers interface choices the user makes by
+*using* the TUI rather than by configuring it — currently just the grid's cell style. It sits with
+the state rather than the catalog on that distinction: losing it costs a keystroke, not a setting,
+so every read tolerates a missing or corrupt file by falling back to the default.
 
 The catalog is *config*, which is why it isn't under the state dir: a user should be able to wipe
 `~/.local/state/pairin` without losing their project list, and should be able to keep the file in a

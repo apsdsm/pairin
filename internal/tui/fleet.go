@@ -56,6 +56,7 @@ type FleetModel struct {
 
 func NewFleetModel(h *hub.Hub) FleetModel {
 	m := FleetModel{hub: h, grid: NewGrid()}
+	m.grid.SetCellStyle(RememberedCellStyle())
 	m.refresh()
 	return m
 }

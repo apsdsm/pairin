@@ -6,6 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/apsdsm/pairin/internal/process"
+	"github.com/apsdsm/pairin/internal/state"
 )
 
 // Grid renders services as a compact wrapping grid of status cells, grouped by
@@ -92,6 +93,19 @@ func (s CellStyle) String() string {
 		return "cards"
 	default:
 		return "plain"
+	}
+}
+
+// ParseCellStyle turns a stored name back into a style. Anything unrecognized
+// falls back to plain, which always fits.
+func ParseCellStyle(s string) CellStyle {
+	switch s {
+	case "boxed":
+		return CellBoxed
+	case "cards":
+		return CellCard
+	default:
+		return CellPlain
 	}
 }
 
@@ -200,8 +214,25 @@ func (g *Grid) CellStyle() CellStyle { return g.cellStyle }
 // SetCellStyle changes how much room each service gets.
 func (g *Grid) SetCellStyle(s CellStyle) { g.cellStyle = s }
 
-// CycleCellStyle steps to the next cell style.
-func (g *Grid) CycleCellStyle() { g.cellStyle = g.cellStyle.Next() }
+// CycleCellStyle steps to the next cell style and remembers the choice, so the
+// next TUI opens in the style you were last using.
+func (g *Grid) CycleCellStyle() {
+	g.cellStyle = g.cellStyle.Next()
+	rememberCellStyle(g.cellStyle)
+}
+
+// rememberCellStyle persists the choice. Best-effort: a preferences file that
+// can't be written is not a reason to interrupt anyone.
+func rememberCellStyle(s CellStyle) {
+	ui := state.LoadUI()
+	ui.CellStyle = s.String()
+	_ = state.SaveUI(ui)
+}
+
+// RememberedCellStyle is the style the user was last in.
+func RememberedCellStyle() CellStyle {
+	return ParseCellStyle(state.LoadUI().CellStyle)
+}
 
 // visibleGroups applies the filter. Groups that lose all their cells are kept
 // only if they had a note to show in the first place — an empty project header

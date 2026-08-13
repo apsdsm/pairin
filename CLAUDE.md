@@ -42,6 +42,7 @@ internal/
   state/
     state.go                   # .pairin/state.json + supervisor.pid lock + IsProcessAlive helpers
     registry.go                # Host-wide registry under $XDG_STATE_HOME/pairin/instances/
+    ui.go                      # Remembered TUI choices (grid cell style) in $XDG_STATE_HOME/pairin/ui.json
     logfile.go                 # Per-service log paths and 10 MiB rotation threshold
   tui/
     model.go                   # Bubble Tea model: keys, layout, split/grid/focus views; talks to a Backend interface
