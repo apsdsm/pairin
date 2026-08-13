@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -190,5 +191,64 @@ func TestSaveGoesUnderConfigHome(t *testing.T) {
 	}
 	if want := filepath.Join(dir, "pairin", "projects.toml"); path != want {
 		t.Errorf("Path = %q, want %q", path, want)
+	}
+}
+
+// Entries written before pinning existed have no `auto` field, and must keep
+// showing: a user who ran `pairin register` did so deliberately.
+func TestPinnedDefaultsToTrueForExistingEntries(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	if err := os.MkdirAll(filepath.Join(dir, "pairin"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	old := "[[project]]\n  name = \"legacy\"\n  config = \"/p/.pairinrc.toml\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "pairin", "projects.toml"), []byte(old), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !c.Projects[0].Pinned() {
+		t.Error("an entry from before pinning existed came back unpinned")
+	}
+}
+
+func TestSetPinned(t *testing.T) {
+	c := &Catalog{}
+	if _, err := c.Add(Project{Name: "temp", Config: "/tmp/x/.pairinrc.toml", Auto: true}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if c.Projects[0].Pinned() {
+		t.Fatal("an auto-added entry started out pinned")
+	}
+
+	if _, err := c.SetPinned("/tmp/x/.pairinrc.toml", "X", true); err != nil {
+		t.Fatalf("SetPinned: %v", err)
+	}
+	if !c.Projects[0].Pinned() {
+		t.Error("pinning did not take")
+	}
+
+	if _, err := c.SetPinned("/tmp/x/.pairinrc.toml", "X", false); err != nil {
+		t.Fatalf("SetPinned: %v", err)
+	}
+	if c.Projects[0].Pinned() {
+		t.Error("unpinning did not take")
+	}
+
+	// A project started by path has no entry until someone asks to keep it.
+	if _, err := c.SetPinned("/tmp/y/.pairinrc.toml", "Y", true); err != nil {
+		t.Fatalf("SetPinned on an unknown project: %v", err)
+	}
+	entry, ok := c.ByConfig("/tmp/y/.pairinrc.toml")
+	if !ok {
+		t.Fatal("pinning an unregistered project did not add it")
+	}
+	if !entry.Pinned() {
+		t.Error("newly pinned project came back unpinned")
 	}
 }

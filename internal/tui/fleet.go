@@ -213,6 +213,9 @@ func (m FleetModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "S":
 		return m.stopProject()
 
+	case "p":
+		return m.togglePin()
+
 	case "c":
 		return m.act("clear logs for", func(id hub.InstanceID, svc string) error {
 			return m.hub.ClearLogs(id, svc)
@@ -282,6 +285,9 @@ func (m FleetModel) act(verb string, fn func(hub.InstanceID, string) error) (tea
 	if !ok {
 		return m, nil
 	}
+	if service == "" {
+		return m.fail(fmt.Sprintf("%s has no services to %s", inst.Label(), verb)), nil
+	}
 	if inst.State != hub.StateConnected {
 		return m.fail(fmt.Sprintf("%s is not running — press s to start it", inst.Label())), nil
 	}
@@ -316,6 +322,31 @@ func (m FleetModel) start() (tea.Model, tea.Cmd) {
 	return m.act("start", func(id hub.InstanceID, svc string) error {
 		return m.hub.StartService(id, svc)
 	})
+}
+
+// togglePin decides whether a project keeps its place in the dashboard once it
+// stops running. Unpinning is how a project that was only ever started to check
+// something gets out of the way again.
+func (m FleetModel) togglePin() (tea.Model, tea.Cmd) {
+	inst, _, ok := m.selection()
+	if !ok {
+		return m, nil
+	}
+
+	pin := !inst.Pinned
+	if err := m.hub.SetPinned(inst.ID, pin); err != nil {
+		return m.fail(fmt.Sprintf("could not pin %s: %v", inst.Label(), err)), nil
+	}
+	m.hub.Refresh()
+	m.refresh()
+
+	if pin {
+		return m.note(fmt.Sprintf("pinned %s — it will stay listed when stopped", inst.Label())), nil
+	}
+	if inst.State == hub.StateConnected {
+		return m.note(fmt.Sprintf("unpinned %s — it will drop off this list when it stops", inst.Label())), nil
+	}
+	return m.note(fmt.Sprintf("unpinned %s", inst.Label())), nil
 }
 
 func (m FleetModel) stopProject() (tea.Model, tea.Cmd) {
@@ -424,7 +455,16 @@ func (m *FleetModel) refresh() {
 			})
 		}
 		if len(grp.Cells) == 0 {
-			grp.Note = "no services found in config"
+			// A project with nothing to list still needs to be reachable —
+			// otherwise an entry whose config has gone missing can be seen but
+			// never selected, and so never pinned, started, or got rid of. The
+			// placeholder carries an empty service name, which the actions read
+			// as "this is about the project, not a service".
+			grp.Cells = append(grp.Cells, GridCell{
+				Key:    fleetKey(inst.ID, ""),
+				Name:   "(no services)",
+				Status: process.StatusStopped,
+			})
 		}
 		groups = append(groups, grp)
 	}
@@ -497,8 +537,8 @@ func (m FleetModel) renderHeader() string {
 		}
 	}
 
-	summary := fmt.Sprintf("%d projects (%d up) · %d services · %d running",
-		len(m.instances), running, services, up)
+	summary := fmt.Sprintf("%s (%d up) · %s · %d running",
+		plural(len(m.instances), "project"), running, plural(services, "service"), up)
 	head := HeaderStyle.Render("pairin") + "  " + DimStyle.Render(summary)
 	if f := m.grid.Filter(); f != "" {
 		head += "  " + StatusStarting.Render("filter: "+f)
@@ -534,7 +574,7 @@ func (m FleetModel) renderKeys() string {
 	case m.zoomed:
 		return FooterStyle.Render("↑↓ scroll  r restart  c clear logs  z back  q quit")
 	default:
-		return FooterStyle.Render("↑↓←→ move  z logs  r restart  x stop  s start  S down  c clear logs  b cells  / filter  q quit")
+		return FooterStyle.Render("↑↓←→ move  z logs  r restart  x stop  s start  S down  c clear  p pin  b cells  / filter  q quit")
 	}
 }
 
@@ -542,6 +582,9 @@ func (m FleetModel) renderKeys() string {
 // state it's in.
 func instanceSubtitle(inst hub.InstanceView) string {
 	parts := []string{shortenPath(filepath.Dir(inst.ConfigPath))}
+	if inst.Pinned {
+		parts = append(parts, "📌")
+	}
 
 	switch inst.State {
 	case hub.StateConnected:
@@ -559,6 +602,12 @@ func instanceSubtitle(inst hub.InstanceView) string {
 		parts = append(parts, "stopped — press s to start")
 	}
 
+	if !inst.Pinned {
+		// Flagged so it isn't a surprise when the project drops off the list
+		// after being stopped. 'p' keeps it.
+		parts = append(parts, "unpinned")
+	}
+
 	return strings.Join(parts, "  ")
 }
 
@@ -569,6 +618,13 @@ func shortenPath(path string) string {
 		return "~" + path[len(home):]
 	}
 	return path
+}
+
+func plural(n int, word string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, word)
+	}
+	return fmt.Sprintf("%d %ss", n, word)
 }
 
 // FormatUptime renders a duration as a short human string ("2h13m", "5d").

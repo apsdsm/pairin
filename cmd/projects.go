@@ -70,6 +70,8 @@ func runRegister(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Registering is a deliberate act, so the entry is pinned: it stays in the
+	// dashboard whether or not the project is running.
 	entry := catalog.Project{
 		Name:    registerName,
 		Display: cfg.Project.Name,
@@ -126,16 +128,23 @@ func runProjects(cmd *cobra.Command, args []string) error {
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tGROUP\tSTATUS\tCONFIG")
+	fmt.Fprintln(tw, "NAME\tGROUP\tPINNED\tSTATUS\tCONFIG")
 	for _, p := range cat.Projects {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
 			p.Name,
 			dashIfEmpty(p.Group),
+			pinnedLabel(p),
 			projectStatus(p, running),
 			p.Config,
 		)
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	fmt.Println()
+	fmt.Println("Unpinned projects were added automatically by `pairin up`; they drop out of")
+	fmt.Println("`pairin dash` once they stop. Press p in the dashboard to pin or unpin one.")
+	return nil
 }
 
 // projectStatus describes a catalog entry's current state. A config that has
@@ -149,6 +158,13 @@ func projectStatus(p catalog.Project, running map[string]int) string {
 		return "MISSING config"
 	}
 	return "stopped"
+}
+
+func pinnedLabel(p catalog.Project) string {
+	if p.Pinned() {
+		return "yes"
+	}
+	return "auto"
 }
 
 func dashIfEmpty(s string) string {

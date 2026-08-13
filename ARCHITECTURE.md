@@ -228,6 +228,27 @@ Lookup order inside `Catalog.Find` is exact name → exact config path → uniqu
 ambiguous prefix returns `ErrAmbiguous` rather than picking one: starting the wrong project's
 services isn't a mistake the user can undo by pressing ctrl-C.
 
+### Pinning
+
+Catalog entries carry an `Auto` flag, and the dashboard shows a stopped project only when it is
+*pinned* (`!Auto`). `pairin register` writes pinned entries; `pairin up`'s auto-registration writes
+unpinned ones. The distinction is between a commitment and a convenience: a project started once to
+check something should not occupy the dashboard forever afterwards.
+
+The field is stored **inverted** — `auto = true` in the file, absence meaning pinned — so entries
+written before pinning existed keep appearing, which is what someone who ran `pairin register`
+deliberately would expect. That's the only reason it isn't called `Pinned`.
+
+The hub filters in `Refresh`: an entry that is neither running nor pinned is dropped from `found`
+before instances are reconciled, so its supervise goroutine is torn down too. `Hub.SetPinned`
+updates the catalog and will *add* an entry for a project that was started by path and never
+registered.
+
+A project with no cells — its config moved or deleted — would otherwise be visible but unselectable,
+and so impossible to unpin. `FleetModel.refresh` gives such a group a single placeholder cell whose
+service name is empty; `selection()` returns it with an empty service, which the service-level
+actions treat as "this is about the project".
+
 Catalog names are slugs (`Slugify`) rather than display names, because real project names look like
 `JJC2 (localdev)` and make poor command-line arguments. Collisions are resolved by qualifying with
 the parent directory before falling back to a counter — several checkouts of one project legitimately

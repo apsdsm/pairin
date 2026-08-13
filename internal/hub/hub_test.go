@@ -286,3 +286,104 @@ func TestSnapshotIsRaceFree(t *testing.T) {
 	}
 	<-done
 }
+
+// The scenario this was built for: something starts a project temporarily,
+// `pairin up` auto-registers it, and once it stops it should get out of the
+// way rather than sitting in the dashboard forever.
+func TestUnpinnedProjectDropsOffWhenStopped(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "cfg"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "st"))
+
+	temp := project(t, root, "temp", "svc")
+	kept := project(t, root, "kept", "svc")
+
+	cat := &catalog.Catalog{}
+	if _, err := cat.Add(catalog.Project{Display: "temp", Config: temp, Auto: true}); err != nil {
+		t.Fatalf("catalog add: %v", err)
+	}
+	if _, err := cat.Add(catalog.Project{Display: "kept", Config: kept}); err != nil {
+		t.Fatalf("catalog add: %v", err)
+	}
+	if err := cat.Save(); err != nil {
+		t.Fatalf("catalog save: %v", err)
+	}
+
+	h := New()
+	defer h.Close()
+	h.Refresh()
+
+	// Neither is running, so only the pinned one should be listed.
+	waitFor(t, "only the pinned project", 5*time.Second, func() bool {
+		v := h.Snapshot()
+		return len(v) == 1 && v[0].ConfigPath == kept
+	})
+
+	// While it is running, the unpinned one appears again — you can still see
+	// and act on anything that's actually up.
+	startSupervisor(t, temp)
+	if err := state.Register(state.Instance{
+		SupervisorPID: os.Getpid(), ConfigPath: temp, ProjectName: "temp",
+		SocketPath: state.SocketPath(temp), StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	h.Refresh()
+
+	waitFor(t, "the running unpinned project to appear", 5*time.Second, func() bool {
+		for _, v := range h.Snapshot() {
+			if v.ConfigPath == temp {
+				return !v.Pinned
+			}
+		}
+		return false
+	})
+}
+
+// Pinning is how a project that would otherwise vanish gets kept, and works on
+// one that was never in the catalog at all.
+func TestSetPinnedKeepsAProject(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "cfg"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "st"))
+
+	// Running, but never registered.
+	p := project(t, root, "adhoc", "svc")
+	startSupervisor(t, p)
+	if err := state.Register(state.Instance{
+		SupervisorPID: os.Getpid(), ConfigPath: p, ProjectName: "adhoc",
+		SocketPath: state.SocketPath(p), StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	h := New()
+	defer h.Close()
+	h.Refresh()
+
+	waitFor(t, "the running project", 5*time.Second, func() bool {
+		v := h.Snapshot()
+		return len(v) == 1 && !v[0].Pinned
+	})
+
+	if err := h.SetPinned(InstanceID(p), true); err != nil {
+		t.Fatalf("SetPinned: %v", err)
+	}
+
+	cat, err := catalog.Load()
+	if err != nil {
+		t.Fatalf("catalog load: %v", err)
+	}
+	entry, ok := cat.ByConfig(p)
+	if !ok {
+		t.Fatal("pinning did not add the project to the catalog")
+	}
+	if !entry.Pinned() {
+		t.Error("catalog entry is not pinned")
+	}
+
+	h.Refresh()
+	if v := h.Snapshot(); len(v) != 1 || !v[0].Pinned {
+		t.Errorf("hub does not report the project as pinned: %+v", v)
+	}
+}

@@ -86,6 +86,7 @@ type InstanceView struct {
 	State         ConnState
 	Err           error
 	Registered    bool
+	Pinned        bool
 	SupervisorPID int
 	StartedAt     time.Time
 	Services      []process.ServiceView
@@ -109,6 +110,7 @@ type instance struct {
 	configPath string
 	group      string
 	registered bool
+	pinned     bool
 
 	state         ConnState
 	err           error
@@ -186,6 +188,8 @@ func (h *Hub) Close() {
 type discovered struct {
 	name, display, group string
 	registered           bool
+	pinned               bool
+	running              bool
 	pid                  int
 	startedAt            time.Time
 }
@@ -206,7 +210,8 @@ func (h *Hub) Refresh() {
 	if cat, err := catalog.Load(); err == nil {
 		for _, p := range cat.Projects {
 			found[InstanceID(p.Config)] = &discovered{
-				name: p.Name, display: p.Display, group: p.Group, registered: true,
+				name: p.Name, display: p.Display, group: p.Group,
+				registered: true, pinned: p.Pinned(),
 			}
 		}
 	}
@@ -223,9 +228,21 @@ func (h *Hub) Refresh() {
 			}
 			d.pid = inst.SupervisorPID
 			d.startedAt = inst.StartedAt
+			d.running = true
 			if d.display == "" {
 				d.display = inst.ProjectName
 			}
+		}
+	}
+
+	// An unpinned project that isn't running is dropped rather than shown.
+	// These are entries `pairin up` added on the user's behalf; keeping them
+	// forever means a project started once to check something clutters the
+	// dashboard indefinitely, with no services to select and so no way to act
+	// on it. Pinning (p in the dashboard, or `pairin register`) opts back in.
+	for id, d := range found {
+		if !d.running && !d.pinned {
+			delete(found, id)
 		}
 	}
 
@@ -274,6 +291,7 @@ func (h *Hub) Refresh() {
 		}
 		inst.group = d.group
 		inst.registered = d.registered
+		inst.pinned = d.pinned
 		inst.supervisorPID = d.pid
 		if !d.startedAt.IsZero() {
 			inst.startedAt = d.startedAt
@@ -484,6 +502,7 @@ func (h *Hub) Snapshot() []InstanceView {
 			State:         inst.state,
 			Err:           inst.err,
 			Registered:    inst.registered,
+			Pinned:        inst.pinned,
 			SupervisorPID: inst.supervisorPID,
 			StartedAt:     inst.startedAt,
 		}
@@ -553,6 +572,41 @@ func (h *Hub) StartProject(id InstanceID) error {
 		return fmt.Errorf("project is already %s", st)
 	}
 	return launcher.Start(string(id), launcher.DefaultTimeout)
+}
+
+// SetPinned pins or unpins a project, adding it to the catalog if it isn't
+// there yet. An unpinned project disappears from the dashboard as soon as it
+// stops running; a pinned one stays, so it can be started again from here.
+func (h *Hub) SetPinned(id InstanceID, pinned bool) error {
+	h.mu.Lock()
+	inst, ok := h.instances[id]
+	display := ""
+	if ok {
+		display = inst.display
+	}
+	h.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("no such project: %s", id)
+	}
+
+	cat, err := catalog.Load()
+	if err != nil {
+		return fmt.Errorf("loading catalog: %w", err)
+	}
+	if _, err := cat.SetPinned(string(id), display, pinned); err != nil {
+		return err
+	}
+	if err := cat.Save(); err != nil {
+		return fmt.Errorf("saving catalog: %w", err)
+	}
+
+	h.mu.Lock()
+	if inst, ok := h.instances[id]; ok {
+		inst.pinned = pinned
+		inst.registered = true
+	}
+	h.mu.Unlock()
+	return nil
 }
 
 // ClearLogs discards a service's history. An empty service name clears every

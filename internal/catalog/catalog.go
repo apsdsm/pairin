@@ -38,7 +38,21 @@ type Project struct {
 
 	// Group is a free-form label for organizing the listing.
 	Group string `toml:"group,omitempty"`
+
+	// Auto marks an entry added by `pairin up` rather than by the user asking
+	// for it. Those are conveniences, not commitments: a project someone
+	// started once to check something shouldn't sit in the dashboard forever
+	// after it stops.
+	//
+	// The field is stored inverted — absent means pinned — so entries written
+	// before it existed keep showing, which is what a user who registered them
+	// deliberately would expect.
+	Auto bool `toml:"auto,omitempty"`
 }
+
+// Pinned reports whether the project stays visible in the dashboard while it
+// isn't running.
+func (p Project) Pinned() bool { return !p.Auto }
 
 // Catalog is the whole file.
 type Catalog struct {
@@ -170,6 +184,26 @@ func (c *Catalog) Add(p Project) (bool, error) {
 
 	c.Projects = append(c.Projects, p)
 	return true, nil
+}
+
+// SetPinned pins or unpins a project by config path, adding it to the catalog
+// if it isn't there yet — a project started by path has no entry until someone
+// asks to keep it. Returns the resulting entry.
+func (c *Catalog) SetPinned(configPath, display string, pinned bool) (Project, error) {
+	abs := absOrSelf(configPath)
+	for i := range c.Projects {
+		if c.Projects[i].Config == abs {
+			c.Projects[i].Auto = !pinned
+			return c.Projects[i], nil
+		}
+	}
+
+	entry := Project{Display: display, Config: abs, Auto: !pinned}
+	if _, err := c.Add(entry); err != nil {
+		return Project{}, err
+	}
+	added, _ := c.ByConfig(abs)
+	return added, nil
 }
 
 // Remove deletes the entry matching query (by name or config path).

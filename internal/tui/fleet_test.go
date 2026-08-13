@@ -446,3 +446,59 @@ func TestFleetClearLogs(t *testing.T) {
 	}
 	t.Errorf("log file never shrank below %d bytes", before)
 }
+
+// A project with nothing to list must still be reachable. Without a
+// placeholder it could be seen but never selected, so an entry whose config had
+// gone missing could not be pinned, started, or got rid of.
+func TestFleetEmptyProjectIsSelectable(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "cfg"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "st"))
+
+	// Registered, pinned, but its config has since been deleted — exactly what
+	// a temporary project leaves behind.
+	gone := filepath.Join(root, "gone", ".pairinrc.toml")
+	writeCatalog(t, gone)
+
+	h := hub.New()
+	t.Cleanup(h.Close)
+	h.Refresh()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && len(h.Snapshot()) == 0 {
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	m := NewFleetModel(h)
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = model.(FleetModel)
+
+	inst, service, ok := m.selection()
+	if !ok {
+		t.Fatal("a project with no services could not be selected")
+	}
+	if service != "" {
+		t.Errorf("placeholder selection reported service %q, want empty", service)
+	}
+	if inst.ConfigPath != gone {
+		t.Errorf("selected %q, want %q", inst.ConfigPath, gone)
+	}
+
+	// Service-level actions explain themselves rather than doing nothing.
+	after := sendFleet(m, key("r"))
+	if !after.statusErr || !strings.Contains(after.status, "no services") {
+		t.Errorf("restart on an empty project said %q, want an explanation", after.status)
+	}
+
+	// And it can be unpinned, which is how it gets out of the way for good.
+	after = sendFleet(m, key("p"))
+	if after.statusErr {
+		t.Fatalf("unpinning failed: %s", after.status)
+	}
+	if !strings.Contains(after.status, "unpinned") {
+		t.Errorf("status = %q, want it to mention unpinning", after.status)
+	}
+	if len(h.Snapshot()) != 0 {
+		t.Error("unpinned stopped project is still listed")
+	}
+}

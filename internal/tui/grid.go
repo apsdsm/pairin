@@ -733,12 +733,7 @@ func (g Grid) View() string {
 			lines = append(lines, "")
 
 		case lineTitle:
-			grp := groups[spec.group]
-			title := HeaderStyle.Render(grp.Title)
-			if grp.Subtitle != "" {
-				title += "  " + DimStyle.Render(grp.Subtitle)
-			}
-			lines = append(lines, title)
+			lines = append(lines, g.renderTitle(groups[spec.group]))
 
 		case lineNote:
 			lines = append(lines, "  "+DimStyle.Render(groups[spec.group].Note))
@@ -765,6 +760,33 @@ func (g Grid) View() string {
 	}
 
 	return strings.Join(g.window(lines, l), "\n")
+}
+
+// renderTitle draws a group's heading, trimmed to the grid's width. Project
+// paths and status notes are both open-ended, so the line has to be clipped
+// rather than trusted to fit.
+func (g Grid) renderTitle(grp GridGroup) string {
+	name := grp.Title
+	if g.width > 0 && lipgloss.Width(name) > g.width {
+		name = truncate(name, g.width)
+	}
+	out := HeaderStyle.Render(name)
+
+	if grp.Subtitle == "" {
+		return out
+	}
+	room := g.width - lipgloss.Width(name) - 2
+	if g.width <= 0 {
+		room = lipgloss.Width(grp.Subtitle)
+	}
+	if room < 4 {
+		return out
+	}
+	sub := grp.Subtitle
+	if lipgloss.Width(sub) > room {
+		sub = truncate(sub, room)
+	}
+	return out + "  " + DimStyle.Render(sub)
 }
 
 // window trims the rendered lines to the grid's height, keeping the selected

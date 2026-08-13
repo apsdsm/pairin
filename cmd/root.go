@@ -132,7 +132,10 @@ func autoRegister(cfg *config.Config) {
 	if err != nil {
 		return
 	}
-	added, err := cat.Add(catalog.Project{Display: cfg.Project.Name, Config: cfg.Path})
+	// Auto: this is a convenience, not a commitment. An unpinned project drops
+	// out of the dashboard once it stops, so starting one to check something
+	// doesn't leave a permanent entry behind.
+	added, err := cat.Add(catalog.Project{Display: cfg.Project.Name, Config: cfg.Path, Auto: true})
 	if err != nil || !added {
 		return
 	}

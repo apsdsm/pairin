@@ -98,6 +98,19 @@ LGC (localdev)  ~/Code/lgc_main  sup 2863604  35s
 Registered projects that aren't running appear greyed out with their service names read from their
 config, so you can see a project's shape before starting it — `s` starts it in place.
 
+### Pinned and unpinned projects
+
+Running projects always appear. Stopped ones appear only if they're **pinned**, marked 📌:
+
+- `pairin register` pins a project. Registering is a deliberate act, so it stays listed.
+- `pairin up` adds an unpinned entry. Starting a project once to check something shouldn't leave a
+  permanent entry behind, so it drops off the dashboard as soon as it stops.
+- `p` in the dashboard toggles pinning, including for projects that were never registered at all.
+
+A project with no services to list — usually one whose config file has been moved or deleted — still
+gets a selectable `(no services)` placeholder, so it can be pinned, started, or unpinned like any
+other. `pairin projects` shows the pin state of everything in the catalog.
+
 ### Cell styles
 
 `b` cycles how much room each service gets — densest first:
@@ -141,6 +154,7 @@ another terminal appear on their own, and supervisors that go away are dropped.
 | `x`            | Stop the selected service                                  |
 | `s`            | Start the selected service, or the whole project if it's down |
 | `S`            | Shut down the selected project                             |
+| `p`            | Pin or unpin the selected project (pinned = always listed) |
 | `c` / `C`      | Clear the selected service's logs / the whole project's    |
 | `b`            | Cycle cell style: plain → boxed → cards                    |
 | `/`            | Filter services by name, across every project              |
@@ -162,7 +176,9 @@ pairin down acme-api
 ```
 
 Running `pairin up` in a project registers it automatically, so the catalog fills itself in as you
-work. Pass `--no-register` to opt out of that for a particular project.
+work. Pass `--no-register` to opt out of that for a particular project. Entries added this way are
+**unpinned** — they show in `pairin dash` while running and drop off when stopped, so a project
+started once to check something doesn't clutter the dashboard forever. `pairin register` pins.
 
 Names are slugs derived from the `[project].name` in the config — "Acme API (localdev)" becomes
 `acme-api-localdev` — because display names with spaces and parentheses make poor things to type.
