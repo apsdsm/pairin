@@ -731,33 +731,6 @@ func cellLabel(c GridCell, avail int) string {
 	return glyphStyle.Render(glyph) + " " + nameStyle.Render(label)
 }
 
-// cellDetail is the second line of a card: what the glyph can't say on its own.
-func cellDetail(c GridCell) string {
-	switch c.Status {
-	case process.StatusRunning:
-		if c.HasHealth && !c.Healthy {
-			return "unhealthy"
-		}
-		if c.PID > 0 {
-			return fmt.Sprintf("pid %d", c.PID)
-		}
-		return "running"
-	case process.StatusRestarting:
-		if c.MaxRestarts > 0 {
-			return fmt.Sprintf("retry %d/%d", c.RestartCount, c.MaxRestarts)
-		}
-		return fmt.Sprintf("retry #%d", c.RestartCount)
-	case process.StatusWaiting:
-		// Deliberately not "waits <dependency>": column width is sized to fit
-		// the widest detail, so an unbounded service name widened every cell —
-		// and then narrowed again as services started, reflowing the whole grid
-		// exactly when it was changing fastest.
-		return "waiting"
-	default:
-		return c.Status.String()
-	}
-}
-
 // boxChars returns the border pieces for a cell. The selected cell gets a heavy
 // border as well as the caret — the caret alone is easy to lose among twenty
 // boxes, and a heavy edge reads at a glance without inverting a whole block.
@@ -824,11 +797,16 @@ func renderBoxedRow(cells []GridCell, selectedAt int, cellWide int, card bool, h
 }
 
 // cardDetails is what goes under a card's name: the ports it is listening on,
-// one per line, or its status when it has none. The last line absorbs any
-// overflow so a service with a dozen ports doesn't stretch the row.
+// one per line. The last line absorbs any overflow so a service with a dozen
+// ports doesn't stretch the row.
+//
+// Nothing when there are no ports. The slot means one thing — where to reach
+// this service — and filling it with a PID when that answer isn't available
+// puts two unrelated kinds of value in the same place, which reads as noise.
+// The glyph already carries the status, and the PID is in the zoomed view.
 func cardDetails(c GridCell, room int) []string {
 	if len(c.Ports) == 0 {
-		return []string{cellDetail(c)}
+		return nil
 	}
 	if room < 1 {
 		room = 1

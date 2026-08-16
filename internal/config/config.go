@@ -29,6 +29,11 @@ type Service struct {
 	Cmd          string   `toml:"cmd"`
 	Color        string   `toml:"color"`
 	Healthcheck  string   `toml:"healthcheck"`
+	// Exposes lists ports pairin cannot discover for itself. Ports are normally
+	// read from the kernel by process group, which misses anything bound
+	// outside it — a `docker compose up` service has its ports bound by the
+	// daemon. Declared ports are shown alongside any that are discovered.
+	Exposes      []int    `toml:"exposes"`
 	DependsOn    []string `toml:"depends_on"`
 	Restart      string   `toml:"restart"`       // "no" (default), "always", "on-failure", "on-success"
 	RestartDelay string   `toml:"restart_delay"`  // duration string, e.g. "5s" (default: "3s")
@@ -141,6 +146,12 @@ func (cfg *Config) Validate() error {
 		// Validate max_restarts is non-negative
 		if svc.MaxRestarts < 0 {
 			return fmt.Errorf("service %q has negative max_restarts %d", svc.Name, svc.MaxRestarts)
+		}
+
+		for _, port := range svc.Exposes {
+			if port < 1 || port > 65535 {
+				return fmt.Errorf("service %q exposes port %d, which is not a valid TCP port", svc.Name, port)
+			}
 		}
 	}
 

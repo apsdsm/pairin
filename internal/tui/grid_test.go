@@ -382,38 +382,31 @@ func TestRememberedCellStyleToleratesGarbage(t *testing.T) {
 // to fit the widest detail — so an unbounded one widens every cell, and then
 // narrows again as services change state, reflowing the grid exactly when it
 // is changing fastest. Every detail is therefore short and fixed-ish.
-func TestCellDetailIsBounded(t *testing.T) {
-	const limit = 12 // "pid 1234567" is the longest realistic case
+// Detail lines are bounded in width. Column width is sized to fit the widest
+// detail, so anything unbounded there widens every cell in the grid -- which is
+// what "waits <dependency>" used to do, reflowing the layout as services
+// started. Port labels are short by construction; this holds them to it.
+func TestCardDetailsAreBounded(t *testing.T) {
+	const limit = 12
 
 	cells := []GridCell{
-		{Status: process.StatusRunning, PID: 1234567},
-		{Status: process.StatusRunning, HasHealth: true, Healthy: false},
-		{Status: process.StatusRunning},
+		{Status: process.StatusRunning, Ports: []int{65535}},
+		{Status: process.StatusRunning, Ports: []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}},
 		{Status: process.StatusWaiting},
-		{Status: process.StatusStarting},
-		{Status: process.StatusRestarting, RestartCount: 3, MaxRestarts: 5},
-		{Status: process.StatusRestarting, RestartCount: 12},
-		{Status: process.StatusCrashed},
 		{Status: process.StatusStopped},
 	}
 	for _, c := range cells {
-		if got := cellDetail(c); lipglossWidth(got) > limit {
-			t.Errorf("detail for %v is %q (%d wide), want at most %d",
-				c.Status, got, lipglossWidth(got), limit)
+		for _, line := range cardDetails(c, maxPortLines) {
+			if lipglossWidth(line) > limit {
+				t.Errorf("detail %q is %d wide, want at most %d", line, lipglossWidth(line), limit)
+			}
 		}
 	}
 }
 
-// A service waiting on a long-named dependency must not widen the grid.
-func TestWaitingDetailDoesNotDependOnServiceNames(t *testing.T) {
-	short := GridCell{Name: "api", Status: process.StatusWaiting}
-	long := GridCell{Name: "api", Status: process.StatusWaiting}
-
-	if cellDetail(short) != "waiting" || cellDetail(long) != "waiting" {
-		t.Fatalf("waiting detail = %q / %q, want %q", cellDetail(short), cellDetail(long), "waiting")
-	}
-
-	// The rendered grid is the same width whether services are waiting or up.
+// The grid is the same width whatever state services are in, so it does not
+// reflow as they start.
+func TestCardWidthIsStableAcrossStatus(t *testing.T) {
 	build := func(status process.Status) int {
 		g := NewGrid()
 		g.SetSize(100, 40)
@@ -518,21 +511,31 @@ func TestCardPortsAreCapped(t *testing.T) {
 	}
 }
 
-// With no ports the card still says something useful.
-func TestCardWithoutPortsFallsBackToStatus(t *testing.T) {
-	for _, tt := range []struct {
-		cell GridCell
-		want string
-	}{
-		{GridCell{Name: "x", Status: process.StatusRunning, PID: 4242}, "pid 4242"},
-		{GridCell{Name: "x", Status: process.StatusWaiting}, "waiting"},
-		{GridCell{Name: "x", Status: process.StatusStopped}, "stopped"},
-		{GridCell{Name: "x", Status: process.StatusRunning, HasHealth: true}, "unhealthy"},
+// With no ports the detail area is blank. That slot means one thing — where to
+// reach this service — and a PID in it is a different kind of value in the same
+// place, which is what made it read as noise. The glyph already carries the
+// status, and the PID is in the zoomed view.
+func TestCardWithoutPortsIsBlank(t *testing.T) {
+	for _, c := range []GridCell{
+		{Name: "x", Status: process.StatusRunning, PID: 4242},
+		{Name: "x", Status: process.StatusWaiting},
+		{Name: "x", Status: process.StatusStopped},
+		{Name: "x", Status: process.StatusRunning, HasHealth: true},
 	} {
-		got := cardDetails(tt.cell, maxPortLines)
-		if len(got) != 1 || got[0] != tt.want {
-			t.Errorf("cardDetails(%v) = %v, want [%q]", tt.cell.Status, got, tt.want)
+		if got := cardDetails(c, maxPortLines); len(got) != 0 {
+			t.Errorf("cardDetails(%v) = %v, want nothing", c.Status, got)
 		}
+	}
+
+	// And no PID reaches the rendered card.
+	g := NewGrid()
+	g.SetSize(80, 40)
+	g.SetCellStyle(CellCard)
+	g.SetGroups([]GridGroup{{Cells: []GridCell{
+		{Name: "quiet", Status: process.StatusRunning, PID: 4242},
+	}}})
+	if view := g.View(); strings.Contains(view, "4242") || strings.Contains(view, "pid") {
+		t.Errorf("card showed a PID:\n%s", view)
 	}
 }
 

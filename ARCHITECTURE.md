@@ -287,8 +287,19 @@ walking `/proc`, and a per-service poller would multiply it by the service count
 an event per service per tick would be noise on every connected client.
 
 **Known blind spot:** a `docker compose up` service has its ports bound by the docker daemon, which
-is in nobody's process group but its own. Those services correctly report nothing — the ports exist,
-but not in any process the service owns.
+is in nobody's process group but its own. Those services discover nothing — the ports exist, but not
+in any process the service owns. The `exposes` config field covers exactly that gap.
+
+`mergePorts` unions declared with discovered rather than letting either win: hiding a port a service
+is genuinely listening on would be a lie, and the point of declaring is to cover what discovery can't
+see. Both are gated on the service having a live PGID, so a port on a card always means the service
+is reachable there — a declared port on a stopped service would be an invitation to connect to
+nothing.
+
+The card's detail slot carries **ports and nothing else**, blank when there are none. It briefly
+carried a status fallback (`pid 1234`, `waiting`), which put two unrelated kinds of value in one
+place and read as noise. The glyph already carries status, the restart counter is folded into the
+name line, and the PID lives in the zoomed view's title bar.
 
 ### Pinning
 

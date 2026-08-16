@@ -144,13 +144,29 @@ group has open. Nothing to configure, and it finds the port even when it lives i
 or a `.env` file that pairin never sees.
 
 A service listening on several ports gets several lines, and every card in that row grows to match so
-the grid stays rectangular. Past four ports the last line reads `+N more`. A service with no listener
-of its own falls back to its status (`pid 1234`, `waiting`, `stopped`), and ports disappear when it
-stops. The zoomed log view shows them in its title bar too.
+the grid stays rectangular. Past four ports the last line reads `+N more`. The zoomed log view shows
+them in its title bar too.
 
-One known blind spot: a service that runs `docker compose up` has its ports bound by the docker
-daemon, which isn't in that service's process group — so it shows no ports even though the ports
-exist. A healthcheck usually names the one that matters there.
+The line is blank when there are no ports. It means one thing — where to reach this service — so
+nothing else goes there; the glyph already carries the status, and the PID is in the zoomed view.
+
+#### `exposes`
+
+Discovery works by process group, so it misses anything bound outside it. A service running
+`docker compose up` has its ports bound by the docker daemon, which is in nobody's process group but
+its own, and shows nothing. Declare those:
+
+```toml
+[[services]]
+name = "db"
+cmd = "docker compose up"
+exposes = [5432, 6379, 9000]
+```
+
+Declared ports are shown **alongside** anything discovered, deduplicated and sorted — they add to
+what was found rather than replacing it, since hiding a port a service is genuinely listening on
+would be a lie. Like discovered ports they appear only while the service is running, so a port on a
+card always means you can reach it there.
 
 `z` on any service opens its logs full-screen. Only that one service streams its output while you're
 looking at it; the rest of the host's logs stay off the wire.
@@ -262,6 +278,7 @@ pairin attach -c /path/to/.pairinrc.toml
 | `cmd`           | Shell command to run                                               |
 | `color`         | Pane title color: `blue`, `green`, `yellow`, `red`, `cyan`, `magenta`, `white` |
 | `healthcheck`   | Health endpoint: `tcp://host:port` or `http(s)://url`              |
+| `exposes`       | Ports pairin can't discover for itself, e.g. `[5432, 9000]` — see Ports |
 | `depends_on`    | List of service names that must be healthy before this service starts |
 | `restart`       | Restart policy: `"no"` (default), `"always"`, `"on-failure"`, `"on-success"` |
 | `restart_delay` | Cooldown before restarting, Go duration string (default: `"3s"`)   |

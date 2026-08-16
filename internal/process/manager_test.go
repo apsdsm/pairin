@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"runtime"
+	"sort"
 	"path/filepath"
 	"sync"
 	"syscall"
@@ -1379,3 +1380,77 @@ func containsPort(ports []int, want int) bool {
 type sinkFunc func(tea.Msg)
 
 func (f sinkFunc) Send(msg tea.Msg) { f(msg) }
+
+// exposes covers what discovery cannot see — a docker service binds its ports
+// in the daemon, which is in nobody's process group but its own.
+func TestExposedPortsAreMergedWithDiscovered(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("port discovery reads /proc; only implemented for Linux")
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	discovered := ln.Addr().(*net.TCPAddr).Port
+
+	pgid, err := syscall.Getpgid(os.Getpid())
+	if err != nil {
+		t.Fatalf("getpgid: %v", err)
+	}
+
+	mgr := newTestManager([]config.Service{
+		{Name: "docker", Exposes: []int{5432, 9000}},
+		{Name: "mixed", Exposes: []int{5432}},
+	})
+	mgr.Services[0].PGID = pgid
+	mgr.Services[1].PGID = pgid
+	mgr.refreshPorts()
+
+	// Declared ports show even though this process group binds neither.
+	got := mgr.Services[0].View().Ports
+	for _, want := range []int{5432, 9000} {
+		if !containsPort(got, want) {
+			t.Errorf("declared port %d missing from %v", want, got)
+		}
+	}
+
+	// And they add to what was found rather than replacing it: hiding a port
+	// the service is genuinely listening on would be a lie.
+	got = mgr.Services[1].View().Ports
+	if !containsPort(got, discovered) {
+		t.Errorf("discovered port %d was lost when exposes was set: %v", discovered, got)
+	}
+	if !containsPort(got, 5432) {
+		t.Errorf("declared port missing: %v", got)
+	}
+	if !sort.IntsAreSorted(got) {
+		t.Errorf("ports are not sorted: %v", got)
+	}
+}
+
+// A stopped service exposes nothing: a port on a card means you can reach the
+// service there, and that has to stay true for declared ports too.
+func TestExposedPortsOnlyWhileRunning(t *testing.T) {
+	mgr := newTestManager([]config.Service{{Name: "down", Exposes: []int{5432}}})
+	mgr.Services[0].PGID = 0 // as a stopped service has
+	mgr.refreshPorts()
+
+	if got := mgr.Services[0].View().Ports; len(got) != 0 {
+		t.Errorf("a stopped service reported ports %v", got)
+	}
+}
+
+func TestMergePortsDeduplicates(t *testing.T) {
+	got := mergePorts([]int{3000, 8080}, []int{8080, 5432, 0, -1})
+	want := []int{3000, 5432, 8080}
+	if len(got) != len(want) {
+		t.Fatalf("mergePorts = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("mergePorts = %v, want %v", got, want)
+		}
+	}
+}

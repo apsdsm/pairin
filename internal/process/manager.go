@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -456,13 +457,42 @@ func (m *Manager) refreshPorts() {
 
 	for i, svc := range m.Services {
 		var found []int
+		// Only while the service is actually up: a port on a card means you can
+		// reach the service there, and that has to stay true for declared ports
+		// as much as discovered ones.
 		if views[i].PGID > 0 {
-			found = byPGID[views[i].PGID]
+			found = mergePorts(byPGID[views[i].PGID], svc.Config.Exposes)
 		}
 		if svc.SetPorts(found) {
 			m.send(PortsMsg{Index: i, Ports: found})
 		}
 	}
+}
+
+// mergePorts combines discovered and declared ports into one sorted, deduped
+// list. Declared ports add to what was found rather than replacing it: hiding a
+// port the service is genuinely listening on would be a lie, and the point of
+// declaring is to cover what discovery cannot see.
+func mergePorts(discovered, declared []int) []int {
+	if len(declared) == 0 {
+		return discovered
+	}
+	seen := make(map[int]bool, len(discovered)+len(declared))
+	out := make([]int, 0, len(discovered)+len(declared))
+	for _, p := range discovered {
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	for _, p := range declared {
+		if p > 0 && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	sort.Ints(out)
+	return out
 }
 
 // ClearLogs discards a service's history — the on-disk log and the in-memory

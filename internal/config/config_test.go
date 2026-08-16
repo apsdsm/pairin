@@ -249,3 +249,28 @@ func TestRestartPolicy_Set(t *testing.T) {
 		t.Errorf("expected 'on-failure', got %q", p)
 	}
 }
+
+func TestValidateExposedPorts(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		ports   []int
+		wantErr bool
+	}{
+		{"valid", []int{1, 5432, 65535}, false},
+		{"none", nil, false},
+		{"zero", []int{0}, true},
+		{"negative", []int{-1}, true},
+		{"too high", []int{65536}, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{Services: []Service{{Name: "svc", Cmd: "true", Exposes: tt.ports}}}
+			err := cfg.Validate()
+			if tt.wantErr && err == nil {
+				t.Errorf("Validate() accepted ports %v", tt.ports)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("Validate() rejected ports %v: %v", tt.ports, err)
+			}
+		})
+	}
+}
