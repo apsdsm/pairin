@@ -68,6 +68,8 @@ const (
 	EvtShutdown EventKind = "shutdown"
 	// EvtLogsCleared tells clients to drop their copy of a service's history.
 	EvtLogsCleared EventKind = "logs_cleared"
+	// EvtPorts reports the TCP ports a service is listening on.
+	EvtPorts EventKind = "ports"
 )
 
 // Event is the envelope for all supervisor-to-client messages.
@@ -89,11 +91,20 @@ type Event struct {
 
 	// LogsCleared: one service's history was discarded.
 	LogsCleared *LogsClearedEvent `json:"logs_cleared,omitempty"`
+
+	// Ports: one service's listening ports changed.
+	Ports *PortsEvent `json:"ports,omitempty"`
 }
 
 // LogsClearedEvent is sent after a service's log has been emptied.
 type LogsClearedEvent struct {
 	Service string `json:"service"`
+}
+
+// PortsEvent is sent when the ports a service listens on change.
+type PortsEvent struct {
+	Service string `json:"service"`
+	Ports   []int  `json:"ports,omitempty"`
 }
 
 // Snapshot is a point-in-time description of the supervised world.
@@ -118,6 +129,7 @@ type ServiceSnapshot struct {
 	HasHealth    bool   `json:"has_health"`
 	Adopted      bool   `json:"adopted"`
 	LogFile      string `json:"log_file"`
+	Ports        []int  `json:"ports,omitempty"`
 	RestartCount int    `json:"restart_count"`
 	MaxRestarts  int    `json:"max_restarts"`
 	DependsOn    []string `json:"depends_on,omitempty"`

@@ -6,11 +6,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/apsdsm/pairin/internal/config"
 	"github.com/apsdsm/pairin/internal/state"
 )
@@ -1301,3 +1304,78 @@ func TestClearLogsKeepsAppendWritesContiguous(t *testing.T) {
 		t.Errorf("log holds %q, want just the line written after clearing", data)
 	}
 }
+
+// Ports are discovered from the kernel rather than declared, so this binds a
+// real socket and checks it reaches the service the manager reports.
+func TestRefreshPortsDiscoversARealListener(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("port discovery reads /proc; only implemented for Linux")
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	want := ln.Addr().(*net.TCPAddr).Port
+
+	pgid, err := syscall.Getpgid(os.Getpid())
+	if err != nil {
+		t.Fatalf("getpgid: %v", err)
+	}
+
+	mgr := newTestManager([]config.Service{{Name: "listener"}, {Name: "silent"}})
+	// Point the first service at this process's group; leave the second with
+	// no process group at all, as a stopped service has.
+	mgr.Services[0].PGID = pgid
+
+	var mu sync.Mutex
+	var msgs []PortsMsg
+	mgr.SetSink(sinkFunc(func(m tea.Msg) {
+		if pm, ok := m.(PortsMsg); ok {
+			mu.Lock()
+			msgs = append(msgs, pm)
+			mu.Unlock()
+		}
+	}))
+
+	mgr.refreshPorts()
+
+	found := mgr.Services[0].View().Ports
+	if !containsPort(found, want) {
+		t.Errorf("service ports = %v, want them to include %d", found, want)
+	}
+	if got := mgr.Services[1].View().Ports; len(got) != 0 {
+		t.Errorf("a service with no process group reported ports %v", got)
+	}
+
+	mu.Lock()
+	first := len(msgs)
+	mu.Unlock()
+	if first == 0 {
+		t.Fatal("discovering ports published no event")
+	}
+
+	// Nothing changed, so a second pass must stay quiet rather than re-announce
+	// the same ports to every connected client every poll.
+	mgr.refreshPorts()
+	mu.Lock()
+	second := len(msgs)
+	mu.Unlock()
+	if second != first {
+		t.Errorf("unchanged ports published %d more events", second-first)
+	}
+}
+
+func containsPort(ports []int, want int) bool {
+	for _, p := range ports {
+		if p == want {
+			return true
+		}
+	}
+	return false
+}
+
+type sinkFunc func(tea.Msg)
+
+func (f sinkFunc) Send(msg tea.Msg) { f(msg) }

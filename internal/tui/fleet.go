@@ -735,6 +735,7 @@ func (m *FleetModel) refresh() {
 				RestartCount: svc.RestartCount,
 				MaxRestarts:  svc.MaxRestarts,
 				PID:          svc.PID,
+				Ports:        svc.Ports,
 			})
 		}
 		if len(grp.Cells) == 0 {

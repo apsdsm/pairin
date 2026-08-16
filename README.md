@@ -127,6 +127,31 @@ picker. The directory you were last in is remembered for next time.
 
 `b` cycles how much room each service gets.
 
+### Ports
+
+In card style, each cell lists the TCP ports its service is listening on, one per line:
+
+```
+┏━━━━━━━━━━━━━┓ ╭─────────────╮ ╭─────────────╮
+┃›● single    ┃ │ ● double    │ │ ● quiet     │
+┃   :45001    ┃ │   :45010    │ │   pid 365066│
+┃             ┃ │   :45011    │ │             │
+┗━━━━━━━━━━━━━┛ ╰─────────────╯ ╰─────────────╯
+```
+
+These are **discovered, not declared** — pairin asks the kernel which ports the service's process
+group has open. Nothing to configure, and it finds the port even when it lives inside a vite config
+or a `.env` file that pairin never sees.
+
+A service listening on several ports gets several lines, and every card in that row grows to match so
+the grid stays rectangular. Past four ports the last line reads `+N more`. A service with no listener
+of its own falls back to its status (`pid 1234`, `waiting`, `stopped`), and ports disappear when it
+stops. The zoomed log view shows them in its title bar too.
+
+One known blind spot: a service that runs `docker compose up` has its ports bound by the docker
+daemon, which isn't in that service's process group — so it shows no ports even though the ports
+exist. A healthcheck usually names the one that matters there.
+
 `z` on any service opens its logs full-screen. Only that one service streams its output while you're
 looking at it; the rest of the host's logs stay off the wire.
 

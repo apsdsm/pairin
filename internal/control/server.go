@@ -143,6 +143,14 @@ func (s *Server) eventFor(msg tea.Msg) (Event, bool) {
 		return Event{Kind: EvtLogsCleared, LogsCleared: &LogsClearedEvent{
 			Service: s.mgr.Services[m.Index].Config.Name,
 		}}, true
+	case process.PortsMsg:
+		if m.Index < 0 || m.Index >= len(s.mgr.Services) {
+			return Event{}, false
+		}
+		return Event{Kind: EvtPorts, Ports: &PortsEvent{
+			Service: s.mgr.Services[m.Index].Config.Name,
+			Ports:   m.Ports,
+		}}, true
 	}
 	// AllStartedMsg / ServiceRestartedMsg are TUI-internal; drop them.
 	return Event{}, false
@@ -280,6 +288,7 @@ func serviceSnapshot(svc *process.Service) ServiceSnapshot {
 		HasHealth:    v.HasHealth,
 		Adopted:      v.Adopted,
 		LogFile:      v.LogFile,
+		Ports:        v.Ports,
 		RestartCount: v.RestartCount,
 		MaxRestarts:  v.MaxRestarts,
 		DependsOn:    v.DependsOn,

@@ -22,6 +22,9 @@ internal/
   browse/
     browse.go                     Directory listing for the project picker: dirs, configs, counts
     browse_test.go                Ordering, project names, config counts, skip list
+  ports/
+    ports.go                      Listening TCP ports per process group, read from /proc
+    ports_test.go                 Fake /proc parsing, plus a real socket against the real kernel
   catalog/
     catalog.go                    Registered projects: load/save, name derivation, prefix lookup
     catalog_test.go               Slugs, unique names, idempotent Add, ambiguous lookup
@@ -259,6 +262,33 @@ picker offers it (marked `unpinned — enter to pin`) rather than refusing it as
 would tell the user it is in a list they can plainly see it isn't in. Only a *pinned* config is
 refused. `browse.Entry` therefore carries both `Added` and `Pinned`, and `AddProject` pins an
 existing entry rather than treating it as a no-op.
+
+### Port discovery
+
+`internal/ports` answers "what is this service listening on" by reading the kernel rather than the
+config. A declared port says what a service is *supposed* to expose; this says what it does, which is
+what catches a dev server whose port lives in a framework config pairin never sees.
+
+The lookup is by **process group**. Services are started with `Setpgid`, so every descendant shares
+the service's PGID however many shells and wrappers the command goes through — and `svc.PGID` is
+already recorded for adopted services too. The scan reads `/proc/net/tcp{,6}` for sockets in state
+`0A` (LISTEN), builds inode → port, then walks `/proc/<pid>/stat` for processes whose PGID is wanted
+and maps their `socket:[N]` file descriptors back. Ports are deduplicated (a service bound on both
+IPv4 and IPv6 holds two sockets on one port) and sorted.
+
+Two implementation notes. The PGID parse starts after the *last* `)` in the stat file, because the
+second field is the executable name and may itself contain spaces and parentheses. And the whole
+thing is best-effort: a permission error reading one process's descriptors is not worth failing a
+dashboard over, so errors yield nothing rather than propagating.
+
+`Manager.watchPorts` runs **one** goroutine for all services, not one each: the expensive part is
+walking `/proc`, and a per-service poller would multiply it by the service count. It publishes a
+`PortsMsg` only when a service's ports actually change — they are identical on almost every poll, and
+an event per service per tick would be noise on every connected client.
+
+**Known blind spot:** a `docker compose up` service has its ports bound by the docker daemon, which
+is in nobody's process group but its own. Those services correctly report nothing — the ports exist,
+but not in any process the service owns.
 
 ### Pinning
 

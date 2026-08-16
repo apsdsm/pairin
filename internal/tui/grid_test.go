@@ -437,3 +437,140 @@ func TestWaitingDetailDoesNotDependOnServiceNames(t *testing.T) {
 			waiting, running)
 	}
 }
+
+func portCell(name string, ports ...int) GridCell {
+	return GridCell{Key: name, Name: name, Status: process.StatusRunning, PID: 999, Ports: ports}
+}
+
+// Cards list the ports beneath the name, one per line, and every cell in a row
+// pads to the tallest so the grid stays rectangular.
+func TestCardRowHeightMatchesTheMostPorts(t *testing.T) {
+	g := NewGrid()
+	g.SetSize(100, 40)
+	g.SetCellStyle(CellCard)
+	g.SetGroups([]GridGroup{{Cells: []GridCell{
+		portCell("one", 3000),
+		portCell("three", 4000, 4001, 4002),
+		portCell("none"),
+	}}})
+
+	lines := strings.Split(g.View(), "\n")
+	if len(lines) != 6 {
+		t.Fatalf("row rendered %d lines, want 6 (border, name, 3 ports, border):\n%s", len(lines), g.View())
+	}
+
+	// Every line is the same width: the short cells padded rather than stopping.
+	width := lipglossWidth(lines[0])
+	for i, l := range lines {
+		if w := lipglossWidth(l); w != width {
+			t.Errorf("line %d is %d wide, want %d — a cell did not pad to the row:\n%s", i, w, width, g.View())
+		}
+	}
+
+	// The tall cell's third port is present; the short ones are blank there.
+	if !strings.Contains(lines[4], ":4002") {
+		t.Errorf("third port missing from the tall cell:\n%s", g.View())
+	}
+	if strings.Contains(lines[4], ":3000") {
+		t.Errorf("short cell repeated its port on a padding line:\n%s", g.View())
+	}
+}
+
+// Height is per row, not per grid: a tall row must not stretch the others.
+func TestCardRowsAreIndependentlyTall(t *testing.T) {
+	g := NewGrid()
+	g.SetSize(46, 40) // narrow enough for two cells per row
+	g.SetCellStyle(CellCard)
+	g.SetGroups([]GridGroup{{Cells: []GridCell{
+		portCell("a", 1), portCell("b", 1, 2, 3), // row 1: 3 detail lines
+		portCell("c", 1), portCell("d", 1), // row 2: 1 detail line
+	}}})
+
+	l := g.layout()
+	if len(l.rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(l.rows))
+	}
+	var heights []int
+	for _, s := range l.specs {
+		if s.kind == lineRow {
+			heights = append(heights, s.height)
+		}
+	}
+	if len(heights) != 2 || heights[0] != 6 || heights[1] != 4 {
+		t.Errorf("row heights = %v, want [6 4]", heights)
+	}
+}
+
+// A service listening on a great many ports must not set the height of the
+// whole screen.
+func TestCardPortsAreCapped(t *testing.T) {
+	g := NewGrid()
+	g.SetSize(100, 40)
+	g.SetCellStyle(CellCard)
+	g.SetGroups([]GridGroup{{Cells: []GridCell{portCell("many", 1, 2, 3, 4, 5, 6, 7, 8)}}})
+
+	view := g.View()
+	if lines := strings.Count(view, "\n") + 1; lines != 3+maxPortLines {
+		t.Errorf("card is %d lines, want %d", lines, 3+maxPortLines)
+	}
+	if !strings.Contains(view, "+5 more") {
+		t.Errorf("overflow not summarised:\n%s", view)
+	}
+}
+
+// With no ports the card still says something useful.
+func TestCardWithoutPortsFallsBackToStatus(t *testing.T) {
+	for _, tt := range []struct {
+		cell GridCell
+		want string
+	}{
+		{GridCell{Name: "x", Status: process.StatusRunning, PID: 4242}, "pid 4242"},
+		{GridCell{Name: "x", Status: process.StatusWaiting}, "waiting"},
+		{GridCell{Name: "x", Status: process.StatusStopped}, "stopped"},
+		{GridCell{Name: "x", Status: process.StatusRunning, HasHealth: true}, "unhealthy"},
+	} {
+		got := cardDetails(tt.cell, maxPortLines)
+		if len(got) != 1 || got[0] != tt.want {
+			t.Errorf("cardDetails(%v) = %v, want [%q]", tt.cell.Status, got, tt.want)
+		}
+	}
+}
+
+// Navigation reads the same layout as rendering, so variable row heights must
+// not break moving between rows.
+func TestMoveAcrossVariableHeightRows(t *testing.T) {
+	g := NewGrid()
+	g.SetSize(46, 40)
+	g.SetCellStyle(CellCard)
+	g.SetGroups([]GridGroup{{Cells: []GridCell{
+		portCell("a", 1), portCell("b", 1, 2, 3),
+		portCell("c", 1), portCell("d", 1),
+	}}})
+
+	if got := g.SelectedKey(); got != "a" {
+		t.Fatalf("setup: selection = %q, want a", got)
+	}
+	g.Move(0, 1)
+	if got := g.SelectedKey(); got != "c" {
+		t.Errorf("down from a tall row landed on %q, want c", got)
+	}
+	g.Move(0, -1)
+	if got := g.SelectedKey(); got != "a" {
+		t.Errorf("back up landed on %q, want a", got)
+	}
+}
+
+// Ports must not push a card past the terminal width.
+func TestCardPortsFitWidth(t *testing.T) {
+	g := NewGrid()
+	g.SetSize(80, 40)
+	g.SetCellStyle(CellCard)
+	g.SetGroups([]GridGroup{{Cells: []GridCell{
+		portCell("postgres", 40204), portCell("web", 40201, 24678), portCell("api", 40200),
+	}}})
+	for i, line := range strings.Split(g.View(), "\n") {
+		if w := lipglossWidth(line); w > 80 {
+			t.Errorf("line %d is %d wide, want at most 80: %q", i, w, line)
+		}
+	}
+}

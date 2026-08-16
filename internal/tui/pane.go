@@ -147,6 +147,12 @@ func (p *Pane) titleLine(active bool) string {
 		}
 	}
 
+	// Ports before the PID: when you're looking at a service's logs, where to
+	// reach it is the more useful of the two.
+	for _, port := range svc.Ports {
+		parts = append(parts, PinnedStyle.Render(portLabel(port)))
+	}
+
 	if svc.PID > 0 {
 		parts = append(parts, DimStyle.Render(fmt.Sprintf("PID %d", svc.PID)))
 	}

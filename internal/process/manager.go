@@ -18,6 +18,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/apsdsm/pairin/internal/config"
 	"github.com/apsdsm/pairin/internal/crash"
+	"github.com/apsdsm/pairin/internal/ports"
 	"github.com/apsdsm/pairin/internal/state"
 )
 
@@ -101,6 +102,11 @@ type Service struct {
 	Branch  string
 	Logs    *RingBuffer
 	Healthy bool
+
+	// Ports are the TCP ports this service is listening on, discovered from the
+	// kernel rather than declared. A service that binds nothing of its own has
+	// none — a `docker compose up` service binds its ports in the daemon.
+	Ports []int
 	RestartCount int // number of auto-restarts since last manual start/restart
 
 	// LogFile is the absolute path of the service's stdout/stderr log.
@@ -140,6 +146,8 @@ type ServiceView struct {
 	Branch       string
 	Status       Status
 	PID          int
+	PGID         int
+	Ports        []int
 	Healthy      bool
 	HasHealth    bool
 	Adopted      bool
@@ -162,6 +170,8 @@ func (s *Service) View() ServiceView {
 		Branch:       s.Branch,
 		Status:       s.Status,
 		PID:          s.PID,
+		PGID:         s.PGID,
+		Ports:        append([]int(nil), s.Ports...),
 		Healthy:      s.Healthy,
 		HasHealth:    s.Config.Healthcheck != "",
 		Adopted:      s.Adopted,
@@ -200,6 +210,37 @@ func (s *Service) AppendLog(line string) {
 	s.Logs.Add(line)
 }
 
+// SetPorts records the ports a service is listening on. Returns true if they
+// changed, so a caller can avoid publishing an event every poll.
+func (s *Service) SetPorts(p []int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if samePorts(s.Ports, p) {
+		return false
+	}
+	s.Ports = append([]int(nil), p...)
+	return true
+}
+
+// ApplyPorts records ports on a mirror service.
+func (s *Service) ApplyPorts(p []int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Ports = append([]int(nil), p...)
+}
+
+func samePorts(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // ClearLogBuffer empties the in-memory history.
 func (s *Service) ClearLogBuffer() {
 	s.mu.Lock()
@@ -221,6 +262,7 @@ func (s *Service) UpdateMirror(v ServiceView) {
 	s.Adopted = v.Adopted
 	s.LogFile = v.LogFile
 	s.RestartCount = v.RestartCount
+	s.Ports = append([]int(nil), v.Ports...)
 }
 
 // NewMirrorService creates a Service stub for client-side use. It has no
@@ -367,7 +409,59 @@ func (m *Manager) StartAll() tea.Cmd {
 				m.send(StatusMsg{Index: i, Status: StatusWaiting})
 			}
 		}
+		go m.watchPorts()
 		return AllStartedMsg{}
+	}
+}
+
+// portPollInterval is how often the kernel is asked which ports each service is
+// listening on. Ports settle shortly after a service starts and rarely move
+// after that, so this only needs to be brisk enough to catch startup.
+const portPollInterval = 2 * time.Second
+
+// watchPorts keeps each service's listening ports up to date.
+//
+// One goroutine covers every service rather than one each: the scan walks /proc
+// once and answers for all of them, so per-service pollers would multiply the
+// most expensive part of the work by the number of services.
+func (m *Manager) watchPorts() {
+	defer crash.Guard("ports watcher")
+
+	ticker := time.NewTicker(portPollInterval)
+	defer ticker.Stop()
+
+	for {
+		if m.quitting.Load() {
+			return
+		}
+		m.refreshPorts()
+		<-ticker.C
+	}
+}
+
+// refreshPorts scans once and publishes only what changed — a service's ports
+// are the same on almost every poll, and an event per service per tick would be
+// noise on every connected client.
+func (m *Manager) refreshPorts() {
+	views := make([]ServiceView, len(m.Services))
+	pgids := make([]int, 0, len(m.Services))
+	for i, svc := range m.Services {
+		views[i] = svc.View()
+		if views[i].PGID > 0 {
+			pgids = append(pgids, views[i].PGID)
+		}
+	}
+
+	byPGID := ports.Listening(pgids)
+
+	for i, svc := range m.Services {
+		var found []int
+		if views[i].PGID > 0 {
+			found = byPGID[views[i].PGID]
+		}
+		if svc.SetPorts(found) {
+			m.send(PortsMsg{Index: i, Ports: found})
+		}
 	}
 }
 
@@ -1066,6 +1160,12 @@ type HealthCheckMsg struct {
 // view holding a copy of it should drop that too.
 type LogsClearedMsg struct {
 	Index int
+}
+
+// PortsMsg reports the TCP ports a service is listening on.
+type PortsMsg struct {
+	Index int
+	Ports []int
 }
 
 // checkTCP dials a TCP address with a 1-second timeout.
