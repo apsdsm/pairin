@@ -149,7 +149,7 @@ func (s *Server) eventFor(msg tea.Msg) (Event, bool) {
 		}
 		return Event{Kind: EvtPorts, Ports: &PortsEvent{
 			Service: s.mgr.Services[m.Index].Config.Name,
-			Ports:   m.Ports,
+			Ports:   toWirePorts(m.Ports),
 		}}, true
 	}
 	// AllStartedMsg / ServiceRestartedMsg are TUI-internal; drop them.
@@ -288,7 +288,7 @@ func serviceSnapshot(svc *process.Service) ServiceSnapshot {
 		HasHealth:    v.HasHealth,
 		Adopted:      v.Adopted,
 		LogFile:      v.LogFile,
-		Ports:        v.Ports,
+		Ports:        toWirePorts(v.Ports),
 		RestartCount: v.RestartCount,
 		MaxRestarts:  v.MaxRestarts,
 		DependsOn:    v.DependsOn,

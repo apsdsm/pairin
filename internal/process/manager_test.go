@@ -1368,9 +1368,9 @@ func TestRefreshPortsDiscoversARealListener(t *testing.T) {
 	}
 }
 
-func containsPort(ports []int, want int) bool {
+func containsPort(ports []Port, want int) bool {
 	for _, p := range ports {
-		if p == want {
+		if p.Number == want {
 			return true
 		}
 	}
@@ -1401,8 +1401,8 @@ func TestExposedPortsAreMergedWithDiscovered(t *testing.T) {
 	}
 
 	mgr := newTestManager([]config.Service{
-		{Name: "docker", Exposes: []int{5432, 9000}},
-		{Name: "mixed", Exposes: []int{5432}},
+		{Name: "docker", Exposes: config.ExposeList{{Port: 5432}, {Label: "cache", Port: 9000}}},
+		{Name: "mixed", Exposes: config.ExposeList{{Label: "db", Port: 5432}}},
 	})
 	mgr.Services[0].PGID = pgid
 	mgr.Services[1].PGID = pgid
@@ -1425,15 +1425,22 @@ func TestExposedPortsAreMergedWithDiscovered(t *testing.T) {
 	if !containsPort(got, 5432) {
 		t.Errorf("declared port missing: %v", got)
 	}
-	if !sort.IntsAreSorted(got) {
+	if !sort.SliceIsSorted(got, func(i, j int) bool { return got[i].Number < got[j].Number }) {
 		t.Errorf("ports are not sorted: %v", got)
+	}
+
+	// Labels come from the config and attach to discovered ports too.
+	for _, p := range got {
+		if p.Number == 5432 && p.Label != "db" {
+			t.Errorf("declared label lost: %+v", p)
+		}
 	}
 }
 
 // A stopped service exposes nothing: a port on a card means you can reach the
 // service there, and that has to stay true for declared ports too.
 func TestExposedPortsOnlyWhileRunning(t *testing.T) {
-	mgr := newTestManager([]config.Service{{Name: "down", Exposes: []int{5432}}})
+	mgr := newTestManager([]config.Service{{Name: "down", Exposes: config.ExposeList{{Port: 5432}}}})
 	mgr.Services[0].PGID = 0 // as a stopped service has
 	mgr.refreshPorts()
 
@@ -1443,8 +1450,14 @@ func TestExposedPortsOnlyWhileRunning(t *testing.T) {
 }
 
 func TestMergePortsDeduplicates(t *testing.T) {
-	got := mergePorts([]int{3000, 8080}, []int{8080, 5432, 0, -1})
-	want := []int{3000, 5432, 8080}
+	got := mergePorts([]int{3000, 8080}, config.ExposeList{
+		{Label: "web", Port: 8080}, {Label: "db", Port: 5432}, {Port: 0}, {Port: -1},
+	})
+	want := []Port{
+		{Number: 3000},
+		{Number: 5432, Label: "db"},
+		{Number: 8080, Label: "web"},
+	}
 	if len(got) != len(want) {
 		t.Fatalf("mergePorts = %v, want %v", got, want)
 	}

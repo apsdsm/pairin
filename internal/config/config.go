@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -33,11 +35,109 @@ type Service struct {
 	// read from the kernel by process group, which misses anything bound
 	// outside it — a `docker compose up` service has its ports bound by the
 	// daemon. Declared ports are shown alongside any that are discovered.
-	Exposes      []int    `toml:"exposes"`
+	Exposes      ExposeList `toml:"exposes"`
 	DependsOn    []string `toml:"depends_on"`
 	Restart      string   `toml:"restart"`       // "no" (default), "always", "on-failure", "on-success"
 	RestartDelay string   `toml:"restart_delay"`  // duration string, e.g. "5s" (default: "3s")
 	MaxRestarts  int      `toml:"max_restarts"`   // 0 = unlimited
+}
+
+// Exposed is one declared port, optionally labelled. A service fronting
+// several things — a docker compose stack, say — wants to say which port is
+// which, since a bare number tells you nothing about what answers on it.
+type Exposed struct {
+	Label string
+	Port  int
+}
+
+// ExposeList is a service's declared ports.
+type ExposeList []Exposed
+
+// UnmarshalTOML accepts the several shapes a port list reasonably takes:
+//
+//	exposes = [5432, 9000]                  bare ports
+//	exposes = ["db:5432", "redis:6379"]     labelled
+//	exposes = [["db", 5432], ["redis", 6379]]
+//	exposes = [{label = "db", port = 5432}]
+//
+// The bare form is accepted because it shipped first, and a config that worked
+// yesterday has to keep working.
+func (l *ExposeList) UnmarshalTOML(data any) error {
+	items, ok := data.([]any)
+	if !ok {
+		return fmt.Errorf("exposes must be a list, got %T", data)
+	}
+
+	out := make(ExposeList, 0, len(items))
+	for _, item := range items {
+		e, err := parseExposed(item)
+		if err != nil {
+			return err
+		}
+		out = append(out, e)
+	}
+	*l = out
+	return nil
+}
+
+func parseExposed(item any) (Exposed, error) {
+	switch v := item.(type) {
+	case int64:
+		return Exposed{Port: int(v)}, nil
+	case string:
+		return parseExposedString(v)
+
+	case []any:
+		// ["label", port], in either order — the label is the string half.
+		if len(v) != 2 {
+			return Exposed{}, fmt.Errorf("exposes entry %v must be [label, port]", v)
+		}
+		var e Exposed
+		for _, part := range v {
+			switch p := part.(type) {
+			case string:
+				e.Label = p
+			case int64:
+				e.Port = int(p)
+			default:
+				return Exposed{}, fmt.Errorf("exposes entry %v must be a label and a port", v)
+			}
+		}
+		if e.Port == 0 {
+			return Exposed{}, fmt.Errorf("exposes entry %v has no port", v)
+		}
+		return e, nil
+
+	case map[string]any:
+		var e Exposed
+		if label, ok := v["label"].(string); ok {
+			e.Label = label
+		}
+		if port, ok := v["port"].(int64); ok {
+			e.Port = int(port)
+		}
+		if e.Port == 0 {
+			return Exposed{}, fmt.Errorf("exposes entry %v has no port", v)
+		}
+		return e, nil
+
+	default:
+		return Exposed{}, fmt.Errorf("exposes entry %v (%T) must be a port, \"label:port\", or [label, port]", item, item)
+	}
+}
+
+// parseExposedString reads "5432" or "db:5432".
+func parseExposedString(s string) (Exposed, error) {
+	s = strings.TrimSpace(s)
+	label, num := "", s
+	if i := strings.LastIndex(s, ":"); i >= 0 {
+		label, num = strings.TrimSpace(s[:i]), strings.TrimSpace(s[i+1:])
+	}
+	port, err := strconv.Atoi(num)
+	if err != nil {
+		return Exposed{}, fmt.Errorf("exposes entry %q is not a port or \"label:port\"", s)
+	}
+	return Exposed{Label: label, Port: port}, nil
 }
 
 // ParsedRestartDelay returns the restart delay as a time.Duration.
@@ -148,9 +248,9 @@ func (cfg *Config) Validate() error {
 			return fmt.Errorf("service %q has negative max_restarts %d", svc.Name, svc.MaxRestarts)
 		}
 
-		for _, port := range svc.Exposes {
-			if port < 1 || port > 65535 {
-				return fmt.Errorf("service %q exposes port %d, which is not a valid TCP port", svc.Name, port)
+		for _, e := range svc.Exposes {
+			if e.Port < 1 || e.Port > 65535 {
+				return fmt.Errorf("service %q exposes port %d, which is not a valid TCP port", svc.Name, e.Port)
 			}
 		}
 	}

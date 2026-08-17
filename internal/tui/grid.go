@@ -55,7 +55,7 @@ type GridCell struct {
 
 	// Ports the service is listening on, discovered from the kernel. In card
 	// style these are listed under the name, one per line.
-	Ports []int
+	Ports []process.Port
 }
 
 // key is the cell's identity for selection purposes.
@@ -827,7 +827,22 @@ func cardDetails(c GridCell, room int) []string {
 	return append(out, fmt.Sprintf("+%d more", len(c.Ports)-(room-1)))
 }
 
-func portLabel(p int) string { return fmt.Sprintf(":%d", p) }
+// maxPortLabel bounds the label shown beside a port. Column width is sized to
+// fit the widest detail, so an unbounded label would widen every cell in the
+// grid — the same trap "waits <dependency>" fell into. Eight fits the names
+// worth writing ("postgres", "frontend") and still bounds a detail line at
+// 8 + " :" + 5 digits = 15.
+const maxPortLabel = 8
+
+// portLabel renders one port, with its label when it has one: "db :5432".
+func portLabel(p process.Port) string {
+	if p.Label == "" {
+		return fmt.Sprintf(":%d", p.Number)
+	}
+	return fmt.Sprintf("%s :%d", truncate(p.Label, maxPortLabel), p.Number)
+}
+
+
 
 // padTo pads to a display width, ignoring the styling escapes inside s.
 func padTo(s string, n int) string {

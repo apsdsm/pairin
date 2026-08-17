@@ -11,6 +11,8 @@ package control
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/apsdsm/pairin/internal/process"
 )
 
 // ----- Client -> Supervisor requests -----
@@ -104,7 +106,36 @@ type LogsClearedEvent struct {
 // PortsEvent is sent when the ports a service listens on change.
 type PortsEvent struct {
 	Service string `json:"service"`
-	Ports   []int  `json:"ports,omitempty"`
+	Ports   []Port `json:"ports,omitempty"`
+}
+
+// Port is one reachable port, with an optional label from the config.
+type Port struct {
+	Number int    `json:"port"`
+	Label  string `json:"label,omitempty"`
+}
+
+// UnmarshalJSON also accepts a bare number.
+//
+// Ports went out as plain integers before labels existed, and a supervisor
+// started with that build keeps sending them for as long as it runs. Refusing
+// them would mean a newer dashboard failing to decode a snapshot from a
+// supervisor that is working perfectly well.
+func (p *Port) UnmarshalJSON(data []byte) error {
+	var number int
+	if err := json.Unmarshal(data, &number); err == nil {
+		p.Number, p.Label = number, ""
+		return nil
+	}
+
+	// Aliased to avoid recursing back into this method.
+	type portJSON Port
+	var alias portJSON
+	if err := json.Unmarshal(data, &alias); err != nil {
+		return err
+	}
+	*p = Port(alias)
+	return nil
 }
 
 // Snapshot is a point-in-time description of the supervised world.
@@ -129,7 +160,7 @@ type ServiceSnapshot struct {
 	HasHealth    bool   `json:"has_health"`
 	Adopted      bool   `json:"adopted"`
 	LogFile      string `json:"log_file"`
-	Ports        []int  `json:"ports,omitempty"`
+	Ports        []Port `json:"ports,omitempty"`
 	RestartCount int    `json:"restart_count"`
 	MaxRestarts  int    `json:"max_restarts"`
 	DependsOn    []string `json:"depends_on,omitempty"`
@@ -163,4 +194,28 @@ func MarshalLine(v any) ([]byte, error) {
 		return nil, err
 	}
 	return append(b, '\n'), nil
+}
+
+// toWirePorts converts the process representation for transmission.
+func toWirePorts(in []process.Port) []Port {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]Port, len(in))
+	for i, p := range in {
+		out[i] = Port{Number: p.Number, Label: p.Label}
+	}
+	return out
+}
+
+// fromWirePorts converts back.
+func fromWirePorts(in []Port) []process.Port {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]process.Port, len(in))
+	for i, p := range in {
+		out[i] = process.Port{Number: p.Number, Label: p.Label}
+	}
+	return out
 }

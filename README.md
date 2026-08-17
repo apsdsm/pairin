@@ -158,15 +158,43 @@ its own, and shows nothing. Declare those:
 
 ```toml
 [[services]]
-name = "db"
+name = "stack"
 cmd = "docker compose up"
-exposes = [5432, 6379, 9000]
+exposes = ["db:5432", "redis:6379", "ses:4500", 9000]
+```
+
+Renders as:
+
+```
+╭─────────────────╮
+│ ● stack         │
+│   ses :4500     │
+│   db :5432      │
+│   redis :6379   │
+│   :9000         │
+╰─────────────────╯
+```
+
+A label says what answers on the port, which is the part a bare number can't tell you when one
+service fronts several things. It's optional — `9000` above has none. Labels are truncated to eight
+characters, because column width is sized to fit the widest line and an unbounded label would widen
+every cell in the grid.
+
+Four shapes are accepted, so you can write whichever reads best:
+
+```toml
+exposes = [5432, 9000]                       # bare ports
+exposes = ["db:5432", "redis:6379"]          # labelled
+exposes = [["db", 5432], ["redis", 6379]]
+exposes = [{label = "db", port = 5432}]
 ```
 
 Declared ports are shown **alongside** anything discovered, deduplicated and sorted — they add to
 what was found rather than replacing it, since hiding a port a service is genuinely listening on
-would be a lie. Like discovered ports they appear only while the service is running, so a port on a
-card always means you can reach it there.
+would be a lie. Labels apply to discovered ports too, so declaring `"api:40200"` names that port
+whether or not discovery also finds it — you can label the ones you care about without listing them
+all. Like discovered ports they appear only while the service is running, so a port on a card always
+means you can reach it there.
 
 `z` on any service opens its logs full-screen. Only that one service streams its output while you're
 looking at it; the rest of the host's logs stay off the wire.
@@ -278,7 +306,7 @@ pairin attach -c /path/to/.pairinrc.toml
 | `cmd`           | Shell command to run                                               |
 | `color`         | Pane title color: `blue`, `green`, `yellow`, `red`, `cyan`, `magenta`, `white` |
 | `healthcheck`   | Health endpoint: `tcp://host:port` or `http(s)://url`              |
-| `exposes`       | Ports pairin can't discover for itself, e.g. `[5432, 9000]` — see Ports |
+| `exposes`       | Ports pairin can't discover for itself, e.g. `["db:5432", 9000]` — see Ports |
 | `depends_on`    | List of service names that must be healthy before this service starts |
 | `restart`       | Restart policy: `"no"` (default), `"always"`, `"on-failure"`, `"on-success"` |
 | `restart_delay` | Cooldown before restarting, Go duration string (default: `"3s"`)   |

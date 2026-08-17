@@ -314,8 +314,8 @@ func (c *Client) apply(evt Event) {
 		if !ok {
 			return
 		}
-		c.Services[idx].ApplyPorts(evt.Ports.Ports)
-		c.forward(process.PortsMsg{Index: idx, Ports: evt.Ports.Ports})
+		c.Services[idx].ApplyPorts(fromWirePorts(evt.Ports.Ports))
+		c.forward(process.PortsMsg{Index: idx, Ports: fromWirePorts(evt.Ports.Ports)})
 	case EvtLogsCleared:
 		if evt.LogsCleared == nil {
 			return
@@ -349,7 +349,7 @@ func (c *Client) applySnapshot(snap Snapshot) {
 			svc.Healthy = s.Healthy
 			svc.Adopted = s.Adopted
 			svc.LogFile = s.LogFile
-			svc.Ports = s.Ports
+			svc.Ports = fromWirePorts(s.Ports)
 			svc.RestartCount = s.RestartCount
 			c.Services = append(c.Services, svc)
 			c.nameToIdx[s.Name] = i
@@ -370,7 +370,7 @@ func (c *Client) applySnapshot(snap Snapshot) {
 			Healthy:      s.Healthy,
 			Adopted:      s.Adopted,
 			LogFile:      s.LogFile,
-			Ports:        s.Ports,
+			Ports:        fromWirePorts(s.Ports),
 			RestartCount: s.RestartCount,
 		})
 		c.forward(process.StatusMsg{Index: idx, Status: statusFromString(s.Status), PID: s.PID})

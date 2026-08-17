@@ -292,9 +292,21 @@ in any process the service owns. The `exposes` config field covers exactly that 
 
 `mergePorts` unions declared with discovered rather than letting either win: hiding a port a service
 is genuinely listening on would be a lie, and the point of declaring is to cover what discovery can't
-see. Both are gated on the service having a live PGID, so a port on a card always means the service
-is reachable there — a declared port on a stopped service would be an invitation to connect to
-nothing.
+see. Labels come only from the config and are applied to discovered ports too, so declaring
+`"api:40200"` names that port whether or not discovery also finds it. Both are gated on the service
+having a live PGID, so a port on a card always means the service is reachable there — a declared port
+on a stopped service would be an invitation to connect to nothing.
+
+`config.ExposeList` has a custom `UnmarshalTOML` accepting bare ports, `"label:port"` strings,
+`[label, port]` pairs and `{label, port}` tables. Several shapes for one concept is usually a smell,
+but the bare form shipped first and a config that worked yesterday has to keep working; the rest are
+what people actually reach for. Labels are truncated to `maxPortLabel` when rendered, for the reason
+the whole detail line is bounded — column width is sized to fit it.
+
+On the wire, `control.Port` has a custom `UnmarshalJSON` that also accepts a bare number. Ports went
+out as plain integers before labels existed, and a supervisor started with that build keeps sending
+them for as long as it runs; without this a newer dashboard would fail to decode a snapshot from a
+supervisor that is working perfectly well.
 
 The card's detail slot carries **ports and nothing else**, blank when there are none. It briefly
 carried a status fallback (`pid 1234`, `waiting`), which put two unrelated kinds of value in one

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -253,14 +255,14 @@ func TestRestartPolicy_Set(t *testing.T) {
 func TestValidateExposedPorts(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
-		ports   []int
+		ports   ExposeList
 		wantErr bool
 	}{
-		{"valid", []int{1, 5432, 65535}, false},
+		{"valid", ExposeList{{Port: 1}, {Label: "db", Port: 5432}, {Port: 65535}}, false},
 		{"none", nil, false},
-		{"zero", []int{0}, true},
-		{"negative", []int{-1}, true},
-		{"too high", []int{65536}, true},
+		{"zero", ExposeList{{Port: 0}}, true},
+		{"negative", ExposeList{{Port: -1}}, true},
+		{"too high", ExposeList{{Port: 65536}}, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := &Config{Services: []Service{{Name: "svc", Cmd: "true", Exposes: tt.ports}}}
@@ -272,5 +274,65 @@ func TestValidateExposedPorts(t *testing.T) {
 				t.Errorf("Validate() rejected ports %v: %v", tt.ports, err)
 			}
 		})
+	}
+}
+
+// A port list is written in whatever shape reads best at the time, and the
+// bare form has to keep working because it shipped first.
+func TestExposeListAcceptsEveryForm(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".pairinrc.toml")
+	body := `[project]
+name = "t"
+[[services]]
+name = "a"
+cmd = "true"
+exposes = [5432, "db:6379", ["redis", 2345], {label = "ses", port = 4500}, "9000", "  spaced : 7000 "]
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg, err := LoadFrom(path)
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+
+	want := ExposeList{
+		{Port: 5432},
+		{Label: "db", Port: 6379},
+		{Label: "redis", Port: 2345},
+		{Label: "ses", Port: 4500},
+		{Port: 9000},
+		{Label: "spaced", Port: 7000},
+	}
+	got := cfg.Services[0].Exposes
+	if len(got) != len(want) {
+		t.Fatalf("parsed %d entries, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("entry %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestExposeListRejectsNonsense(t *testing.T) {
+	for _, body := range []string{
+		`exposes = ["not-a-port"]`,
+		`exposes = ["db:"]`,
+		`exposes = [["only-a-label"]]`,
+		`exposes = [true]`,
+		`exposes = "5432"`,
+	} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, ".pairinrc.toml")
+		full := "[project]\nname = \"t\"\n[[services]]\nname = \"a\"\ncmd = \"true\"\n" + body + "\n"
+		if err := os.WriteFile(path, []byte(full), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if _, err := LoadFrom(path); err == nil {
+			t.Errorf("accepted %s", body)
+		}
 	}
 }

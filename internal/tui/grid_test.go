@@ -387,11 +387,12 @@ func TestRememberedCellStyleToleratesGarbage(t *testing.T) {
 // what "waits <dependency>" used to do, reflowing the layout as services
 // started. Port labels are short by construction; this holds them to it.
 func TestCardDetailsAreBounded(t *testing.T) {
-	const limit = 12
+	// A label capped at maxPortLabel, plus " :", plus a five-digit port.
+	const limit = maxPortLabel + 2 + 5
 
 	cells := []GridCell{
-		{Status: process.StatusRunning, Ports: []int{65535}},
-		{Status: process.StatusRunning, Ports: []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}},
+		{Status: process.StatusRunning, Ports: []process.Port{{Number: 65535, Label: "verylonglabel"}}},
+		{Status: process.StatusRunning, Ports: []process.Port{{Number: 1}, {Number: 2}, {Number: 3}, {Number: 4}, {Number: 5}, {Number: 6}, {Number: 7}, {Number: 8}, {Number: 9}, {Number: 10}}},
 		{Status: process.StatusWaiting},
 		{Status: process.StatusStopped},
 	}
@@ -432,7 +433,11 @@ func TestCardWidthIsStableAcrossStatus(t *testing.T) {
 }
 
 func portCell(name string, ports ...int) GridCell {
-	return GridCell{Key: name, Name: name, Status: process.StatusRunning, PID: 999, Ports: ports}
+	p := make([]process.Port, len(ports))
+	for i, n := range ports {
+		p[i] = process.Port{Number: n}
+	}
+	return GridCell{Key: name, Name: name, Status: process.StatusRunning, PID: 999, Ports: p}
 }
 
 // Cards list the ports beneath the name, one per line, and every cell in a row

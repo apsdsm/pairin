@@ -107,7 +107,7 @@ type Service struct {
 	// Ports are the TCP ports this service is listening on, discovered from the
 	// kernel rather than declared. A service that binds nothing of its own has
 	// none — a `docker compose up` service binds its ports in the daemon.
-	Ports []int
+	Ports []Port
 	RestartCount int // number of auto-restarts since last manual start/restart
 
 	// LogFile is the absolute path of the service's stdout/stderr log.
@@ -148,7 +148,7 @@ type ServiceView struct {
 	Status       Status
 	PID          int
 	PGID         int
-	Ports        []int
+	Ports        []Port
 	Healthy      bool
 	HasHealth    bool
 	Adopted      bool
@@ -172,7 +172,7 @@ func (s *Service) View() ServiceView {
 		Status:       s.Status,
 		PID:          s.PID,
 		PGID:         s.PGID,
-		Ports:        append([]int(nil), s.Ports...),
+		Ports:        append([]Port(nil), s.Ports...),
 		Healthy:      s.Healthy,
 		HasHealth:    s.Config.Healthcheck != "",
 		Adopted:      s.Adopted,
@@ -213,24 +213,24 @@ func (s *Service) AppendLog(line string) {
 
 // SetPorts records the ports a service is listening on. Returns true if they
 // changed, so a caller can avoid publishing an event every poll.
-func (s *Service) SetPorts(p []int) bool {
+func (s *Service) SetPorts(p []Port) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if samePorts(s.Ports, p) {
 		return false
 	}
-	s.Ports = append([]int(nil), p...)
+	s.Ports = append([]Port(nil), p...)
 	return true
 }
 
 // ApplyPorts records ports on a mirror service.
-func (s *Service) ApplyPorts(p []int) {
+func (s *Service) ApplyPorts(p []Port) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.Ports = append([]int(nil), p...)
+	s.Ports = append([]Port(nil), p...)
 }
 
-func samePorts(a, b []int) bool {
+func samePorts(a, b []Port) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -263,7 +263,7 @@ func (s *Service) UpdateMirror(v ServiceView) {
 	s.Adopted = v.Adopted
 	s.LogFile = v.LogFile
 	s.RestartCount = v.RestartCount
-	s.Ports = append([]int(nil), v.Ports...)
+	s.Ports = append([]Port(nil), v.Ports...)
 }
 
 // NewMirrorService creates a Service stub for client-side use. It has no
@@ -456,7 +456,7 @@ func (m *Manager) refreshPorts() {
 	byPGID := ports.Listening(pgids)
 
 	for i, svc := range m.Services {
-		var found []int
+		var found []Port
 		// Only while the service is actually up: a port on a card means you can
 		// reach the service there, and that has to stay true for declared ports
 		// as much as discovered ones.
@@ -473,25 +473,35 @@ func (m *Manager) refreshPorts() {
 // list. Declared ports add to what was found rather than replacing it: hiding a
 // port the service is genuinely listening on would be a lie, and the point of
 // declaring is to cover what discovery cannot see.
-func mergePorts(discovered, declared []int) []int {
-	if len(declared) == 0 {
-		return discovered
+//
+// Labels come only from the config, and are applied to discovered ports too —
+// declaring `["api", 40200]` names the port whether or not discovery also finds
+// it, so you can label the ones you care about without listing them all.
+func mergePorts(discovered []int, declared config.ExposeList) []Port {
+	labels := make(map[int]string, len(declared))
+	for _, e := range declared {
+		if e.Port > 0 && e.Label != "" {
+			labels[e.Port] = e.Label
+		}
 	}
+
 	seen := make(map[int]bool, len(discovered)+len(declared))
-	out := make([]int, 0, len(discovered)+len(declared))
+	out := make([]Port, 0, len(discovered)+len(declared))
+	add := func(number int) {
+		if number <= 0 || seen[number] {
+			return
+		}
+		seen[number] = true
+		out = append(out, Port{Number: number, Label: labels[number]})
+	}
 	for _, p := range discovered {
-		if !seen[p] {
-			seen[p] = true
-			out = append(out, p)
-		}
+		add(p)
 	}
-	for _, p := range declared {
-		if p > 0 && !seen[p] {
-			seen[p] = true
-			out = append(out, p)
-		}
+	for _, e := range declared {
+		add(e.Port)
 	}
-	sort.Ints(out)
+
+	sort.Slice(out, func(i, j int) bool { return out[i].Number < out[j].Number })
 	return out
 }
 
@@ -1192,10 +1202,17 @@ type LogsClearedMsg struct {
 	Index int
 }
 
+// Port is a TCP port a service is reachable on, with an optional label from the
+// config. The kernel knows only numbers; labels say what answers there.
+type Port struct {
+	Number int
+	Label  string
+}
+
 // PortsMsg reports the TCP ports a service is listening on.
 type PortsMsg struct {
 	Index int
-	Ports []int
+	Ports []Port
 }
 
 // checkTCP dials a TCP address with a 1-second timeout.
