@@ -320,6 +320,15 @@ Genuine structural errors — an unknown restart policy, a dependency that doesn
 still fail the load. The line is whether pairin can run the config as written: it can run one with an
 unreadable port label, and can't run one with a missing dependency.
 
+Port labels are padded to `gridLayout.labelWide` so the colons form one vertical line down the grid.
+The width is measured across every visible cell rather than per card: cards are all one width, so a
+single figure aligns rows as well as columns, and per-card alignment would do nothing for the common
+case of one port per service — what fails to line up there is the card above against the card below.
+It lives in `gridLayout` because `layout()` is the only source of grid geometry, and it has to be
+measured before the detail lines it pads, since column width is sized to fit them. `shownPorts` is
+split out of `cardDetails` so the width comes only from ports actually rendered — one long label
+hidden behind "+N more" would otherwise indent every card on screen to make room for itself.
+
 On the wire, `control.Port` has a custom `UnmarshalJSON` that also accepts a bare number. Ports went
 out as plain integers before labels existed, and a supervisor started with that build keeps sending
 them for as long as it runs; without this a newer dashboard would fail to decode a snapshot from a

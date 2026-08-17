@@ -397,7 +397,7 @@ func TestCardDetailsAreBounded(t *testing.T) {
 		{Status: process.StatusStopped},
 	}
 	for _, c := range cells {
-		for _, line := range cardDetails(c, maxPortLines) {
+		for _, line := range cardDetails(c, maxPortLines, 0) {
 			if lipglossWidth(line) > limit {
 				t.Errorf("detail %q is %d wide, want at most %d", line, lipglossWidth(line), limit)
 			}
@@ -527,7 +527,7 @@ func TestCardWithoutPortsIsBlank(t *testing.T) {
 		{Name: "x", Status: process.StatusStopped},
 		{Name: "x", Status: process.StatusRunning, HasHealth: true},
 	} {
-		if got := cardDetails(c, maxPortLines); len(got) != 0 {
+		if got := cardDetails(c, maxPortLines, 0); len(got) != 0 {
 			t.Errorf("cardDetails(%v) = %v, want nothing", c.Status, got)
 		}
 	}
@@ -580,5 +580,78 @@ func TestCardPortsFitWidth(t *testing.T) {
 		if w := lipglossWidth(line); w > 80 {
 			t.Errorf("line %d is %d wide, want at most 80: %q", i, w, line)
 		}
+	}
+}
+
+// The colons line up across the whole grid, not just within one card. Most
+// services list a single port, so per-card alignment would be a no-op for
+// exactly the case that needed fixing.
+func TestPortColonsAlignAcrossTheGrid(t *testing.T) {
+	g := NewGrid()
+	g.SetSize(80, 24)
+	g.SetCellStyle(CellCard)
+	g.SetGroups([]GridGroup{{
+		Title: "p",
+		Cells: []GridCell{
+			{Name: "api", Status: process.StatusRunning, Ports: []process.Port{{Number: 40200, Label: "api"}}},
+			{Name: "extapi", Status: process.StatusRunning, Ports: []process.Port{{Number: 40210, Label: "extapi"}}},
+			{Name: "cache", Status: process.StatusRunning, Ports: []process.Port{{Number: 6379}}},
+		},
+	}})
+
+	l := g.layout()
+	if l.labelWide != 6 { // "extapi", the widest label on screen
+		t.Fatalf("labelWide = %d, want 6", l.labelWide)
+	}
+
+	// Every detail line puts its colon in the same column, labelled or not.
+	want := -1
+	for _, c := range g.visibleGroups()[0].Cells {
+		for _, line := range cardDetails(c, maxPortLines, l.labelWide) {
+			at := strings.Index(line, ":")
+			if want == -1 {
+				want = at
+			}
+			if at != want {
+				t.Errorf("%q has its colon at %d, want %d", line, at, want)
+			}
+		}
+	}
+	if want != 7 { // 6 label columns plus the space before the colon
+		t.Errorf("colon column = %d, want 7", want)
+	}
+}
+
+// A grid whose ports are all unlabelled shouldn't indent past a margin nothing
+// occupies.
+func TestUnlabelledPortsAreNotIndented(t *testing.T) {
+	g := NewGrid()
+	g.SetSize(80, 24)
+	g.SetCellStyle(CellCard)
+	g.SetGroups([]GridGroup{{
+		Cells: []GridCell{{Name: "api", Status: process.StatusRunning, Ports: []process.Port{{Number: 8080}}}},
+	}})
+
+	l := g.layout()
+	if l.labelWide != 0 {
+		t.Fatalf("labelWide = %d, want 0 when nothing is labelled", l.labelWide)
+	}
+	if got := cardDetails(g.visibleGroups()[0].Cells[0], maxPortLines, l.labelWide); got[0] != ":8080" {
+		t.Errorf("detail = %q, want %q", got[0], ":8080")
+	}
+}
+
+// The width is measured from the ports actually on screen. A label hidden
+// behind "+N more" must not indent every card to make room for itself.
+func TestHiddenPortsDoNotSetTheLabelWidth(t *testing.T) {
+	ports := []process.Port{{Number: 1, Label: "a"}, {Number: 2, Label: "b"}, {Number: 3, Label: "c"}}
+	ports = append(ports, process.Port{Number: 4, Label: "verylong"})
+	for i := 5; i < 10; i++ {
+		ports = append(ports, process.Port{Number: i, Label: "alsolong"})
+	}
+
+	groups := []GridGroup{{Cells: []GridCell{{Name: "x", Status: process.StatusRunning, Ports: ports}}}}
+	if got := portLabelWidth(groups); got != 1 {
+		t.Errorf("labelWide = %d, want 1 — only a, b, c are shown", got)
 	}
 }

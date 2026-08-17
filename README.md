@@ -168,10 +168,10 @@ Renders as:
 ```
 ╭─────────────────╮
 │ ● stack         │
-│   ses :4500     │
-│   db :5432      │
+│   ses   :4500   │
+│   db    :5432   │
 │   redis :6379   │
-│   :9000         │
+│         :9000   │
 ╰─────────────────╯
 ```
 
@@ -179,6 +179,9 @@ A label says what answers on the port, which is the part a bare number can't tel
 service fronts several things. It's optional — `9000` above has none. Labels are truncated to eight
 characters, because column width is sized to fit the widest line and an unbounded label would widen
 every cell in the grid.
+
+The colons line up across the whole grid, not just within a card, so the ports read as one column
+down the screen. Nothing is indented when no port on screen is labelled.
 
 Four shapes are accepted, so you can write whichever reads best:
 

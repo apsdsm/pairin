@@ -157,6 +157,10 @@ type gridLayout struct {
 	cols     int
 	cellWide int
 
+	// labelWide is the width port labels are padded to, so the colons line up
+	// down the whole grid rather than only within a card.
+	labelWide int
+
 	cells []GridCell // visible cells, flat, in render order
 	specs []lineSpec
 
@@ -411,6 +415,9 @@ func abs(n int) int {
 func (g Grid) layout() gridLayout {
 	groups := g.visibleGroups()
 
+	// Measured before the details themselves, since it's what they pad to.
+	labelWide := portLabelWidth(groups)
+
 	var labels []string
 	for _, grp := range groups {
 		for _, c := range grp.Cells {
@@ -419,7 +426,7 @@ func (g Grid) layout() gridLayout {
 			// ("pid 2994109" against "api"), so they have to be measured too or
 			// they get truncated in cells that otherwise have room to spare.
 			if g.cellStyle == CellCard {
-				labels = append(labels, cardDetails(c, maxPortLines)...)
+				labels = append(labels, cardDetails(c, maxPortLines, labelWide)...)
 			}
 		}
 	}
@@ -434,7 +441,7 @@ func (g Grid) layout() gridLayout {
 		}
 	}
 
-	l := gridLayout{cols: cols, cellWide: cellWide}
+	l := gridLayout{cols: cols, cellWide: cellWide, labelWide: labelWide}
 	showTitles := len(groups) > 1 || (len(groups) == 1 && groups[0].Title != "")
 	line := 0
 	for gi, grp := range groups {
@@ -744,7 +751,7 @@ func boxChars(selected bool) (tl, tr, bl, br, h, v string, style lipgloss.Style)
 // renderBoxedRow draws one row of boxed cells, returning its screen lines.
 // Boxes are separated by a gutter: butted together, adjacent borders read as a
 // doubled rule heavier than the boxes themselves.
-func renderBoxedRow(cells []GridCell, selectedAt int, cellWide int, card bool, height int) []string {
+func renderBoxedRow(cells []GridCell, selectedAt int, cellWide int, card bool, height, labelWide int) []string {
 	const gutter = 1
 	boxWide := cellWide - gutter
 	inner := boxWide - 2
@@ -782,7 +789,7 @@ func renderBoxedRow(cells []GridCell, selectedAt int, cellWide int, card bool, h
 		if card {
 			// Cells shorter than the row pad with blank interior, so the row
 			// stays rectangular however ragged the ports are.
-			details := cardDetails(c, detailLines)
+			details := cardDetails(c, detailLines, labelWide)
 			for d := 0; d < detailLines; d++ {
 				text := ""
 				if d < len(details) {
@@ -804,27 +811,63 @@ func renderBoxedRow(cells []GridCell, selectedAt int, cellWide int, card bool, h
 // this service — and filling it with a PID when that answer isn't available
 // puts two unrelated kinds of value in the same place, which reads as noise.
 // The glyph already carries the status, and the PID is in the zoomed view.
-func cardDetails(c GridCell, room int) []string {
-	if len(c.Ports) == 0 {
+//
+// labelWide pads the labels so the colons line up; see portLabelWidth.
+func cardDetails(c GridCell, room, labelWide int) []string {
+	shown := shownPorts(c, room)
+	if len(shown) == 0 {
 		return nil
 	}
+
+	out := make([]string, 0, len(shown)+1)
+	for _, p := range shown {
+		out = append(out, portLabel(p, labelWide))
+	}
+	if n := len(c.Ports) - len(shown); n > 0 {
+		// Deliberately unpadded: it isn't a port, so lining it up with them
+		// would imply it was one.
+		out = append(out, fmt.Sprintf("+%d more", n))
+	}
+	return out
+}
+
+// shownPorts is the ports a card actually lists, given the lines it has room
+// for. When they don't all fit, the last line goes to "+N more" instead.
+//
+// Split out because the width the labels pad to has to be measured from the
+// ports that are actually rendered — measuring hidden ones would indent every
+// card on screen to accommodate a label nobody can see.
+func shownPorts(c GridCell, room int) []process.Port {
 	if room < 1 {
 		room = 1
 	}
-
 	if len(c.Ports) <= room {
-		out := make([]string, 0, len(c.Ports))
-		for _, p := range c.Ports {
-			out = append(out, portLabel(p))
-		}
-		return out
+		return c.Ports
 	}
+	return c.Ports[:room-1]
+}
 
-	out := make([]string, 0, room)
-	for _, p := range c.Ports[:room-1] {
-		out = append(out, portLabel(p))
+// portLabelWidth is the width every port label is padded to, so that the
+// colons form one vertical line down the grid rather than one per card.
+// Aligning per card would do nothing for the common case — most services list a
+// single port, and what doesn't line up is the card above and the card below.
+//
+// Measured across the whole grid because every column is the same width, so a
+// single figure aligns the rows as well as the columns. Zero when no port on
+// screen has a label, which leaves bare ports flush against the border instead
+// of indenting them past a margin nothing occupies.
+func portLabelWidth(groups []GridGroup) int {
+	w := 0
+	for _, grp := range groups {
+		for _, c := range grp.Cells {
+			for _, p := range shownPorts(c, maxPortLines) {
+				if n := lipgloss.Width(truncate(p.Label, maxPortLabel)); n > w {
+					w = n
+				}
+			}
+		}
 	}
-	return append(out, fmt.Sprintf("+%d more", len(c.Ports)-(room-1)))
+	return w
 }
 
 // maxPortLabel bounds the label shown beside a port. Column width is sized to
@@ -835,11 +878,19 @@ func cardDetails(c GridCell, room int) []string {
 const maxPortLabel = 8
 
 // portLabel renders one port, with its label when it has one: "db :5432".
-func portLabel(p process.Port) string {
-	if p.Label == "" {
+//
+// labelWide right-pads the label so the colon lands in the same column on every
+// line; pass 0 to render it flush, which is what a single port on its own line
+// wants.
+func portLabel(p process.Port, labelWide int) string {
+	label := truncate(p.Label, maxPortLabel)
+	if pad := labelWide - lipgloss.Width(label); pad > 0 {
+		label += strings.Repeat(" ", pad)
+	}
+	if label == "" {
 		return fmt.Sprintf(":%d", p.Number)
 	}
-	return fmt.Sprintf("%s :%d", truncate(p.Label, maxPortLabel), p.Number)
+	return fmt.Sprintf("%s :%d", label, p.Number)
 }
 
 
@@ -905,7 +956,7 @@ func (g Grid) View() string {
 				lines = append(lines, row.String())
 				continue
 			}
-			lines = append(lines, renderBoxedRow(cells, selectedAt, l.cellWide, g.cellStyle == CellCard, spec.height)...)
+			lines = append(lines, renderBoxedRow(cells, selectedAt, l.cellWide, g.cellStyle == CellCard, spec.height, l.labelWide)...)
 		}
 	}
 
