@@ -22,6 +22,9 @@ internal/
   browse/
     browse.go                     Directory listing for the project picker: dirs, configs, counts
     browse_test.go                Ordering, project names, config counts, skip list
+  ports/
+    ports.go                      Listening TCP ports per process group, read from /proc
+    ports_test.go                 Fake /proc parsing, plus a real socket against the real kernel
   catalog/
     catalog.go                    Registered projects: load/save, name derivation, prefix lookup
     catalog_test.go               Slugs, unique names, idempotent Add, ambiguous lookup
@@ -259,6 +262,82 @@ picker offers it (marked `unpinned — enter to pin`) rather than refusing it as
 would tell the user it is in a list they can plainly see it isn't in. Only a *pinned* config is
 refused. `browse.Entry` therefore carries both `Added` and `Pinned`, and `AddProject` pins an
 existing entry rather than treating it as a no-op.
+
+### Port discovery
+
+`internal/ports` answers "what is this service listening on" by reading the kernel rather than the
+config. A declared port says what a service is *supposed* to expose; this says what it does, which is
+what catches a dev server whose port lives in a framework config pairin never sees.
+
+The lookup is by **process group**. Services are started with `Setpgid`, so every descendant shares
+the service's PGID however many shells and wrappers the command goes through — and `svc.PGID` is
+already recorded for adopted services too. The scan reads `/proc/net/tcp{,6}` for sockets in state
+`0A` (LISTEN), builds inode → port, then walks `/proc/<pid>/stat` for processes whose PGID is wanted
+and maps their `socket:[N]` file descriptors back. Ports are deduplicated (a service bound on both
+IPv4 and IPv6 holds two sockets on one port) and sorted.
+
+Two implementation notes. The PGID parse starts after the *last* `)` in the stat file, because the
+second field is the executable name and may itself contain spaces and parentheses. And the whole
+thing is best-effort: a permission error reading one process's descriptors is not worth failing a
+dashboard over, so errors yield nothing rather than propagating.
+
+`Manager.watchPorts` runs **one** goroutine for all services, not one each: the expensive part is
+walking `/proc`, and a per-service poller would multiply it by the service count. It publishes a
+`PortsMsg` only when a service's ports actually change — they are identical on almost every poll, and
+an event per service per tick would be noise on every connected client.
+
+**Known blind spot:** a `docker compose up` service has its ports bound by the docker daemon, which
+is in nobody's process group but its own. Those services discover nothing — the ports exist, but not
+in any process the service owns. The `exposes` config field covers exactly that gap.
+
+`mergePorts` unions declared with discovered rather than letting either win: hiding a port a service
+is genuinely listening on would be a lie, and the point of declaring is to cover what discovery can't
+see. Labels come only from the config and are applied to discovered ports too, so declaring
+`"api:40200"` names that port whether or not discovery also finds it. Both are gated on the service
+having a live PGID, so a port on a card always means the service is reachable there — a declared port
+on a stopped service would be an invitation to connect to nothing.
+
+`config.ExposeList` has a custom `UnmarshalTOML` accepting bare ports, `"label:port"` strings,
+`[label, port]` pairs and `{label, port}` tables. Several shapes for one concept is usually a smell,
+but the bare form shipped first and a config that worked yesterday has to keep working; the rest are
+what people actually reach for. Labels are truncated to `maxPortLabel` when rendered, for the reason
+the whole detail line is bounded — column width is sized to fit it.
+
+The string form is parsed by splitting on `: = , /` and whitespace and taking the single number as
+the port, rather than by matching one syntax. People write `":40111 minio"` and `"minio=9000"` and
+mean the obvious thing, and there is no reading under which either is ambiguous. Two numbers is the
+one case that genuinely is, and it's refused.
+
+**`UnmarshalTOML` never returns an error.** An entry it can't read is kept as `Exposed{Raw, Err}` for
+`Validate` to turn into a `Config.Warning` and drop. This matters more than it looks: a decode error
+fails `config.Load`, which stops the whole project — so before this, one typo in a decorative field
+took twenty working services down with it. Warnings go to stderr on `pairin up` and are written into
+the affected service's log when it starts. The log, not the in-memory ring buffer: a TUI attaching
+later preloads from disk and only sees events after that, so a ring-buffer-only warning is invisible
+to everyone who didn't happen to be attached at supervisor startup.
+
+Genuine structural errors — an unknown restart policy, a dependency that doesn't exist, a cycle —
+still fail the load. The line is whether pairin can run the config as written: it can run one with an
+unreadable port label, and can't run one with a missing dependency.
+
+Port labels are padded to `gridLayout.labelWide` so the colons form one vertical line down the grid.
+The width is measured across every visible cell rather than per card: cards are all one width, so a
+single figure aligns rows as well as columns, and per-card alignment would do nothing for the common
+case of one port per service — what fails to line up there is the card above against the card below.
+It lives in `gridLayout` because `layout()` is the only source of grid geometry, and it has to be
+measured before the detail lines it pads, since column width is sized to fit them. `shownPorts` is
+split out of `cardDetails` so the width comes only from ports actually rendered — one long label
+hidden behind "+N more" would otherwise indent every card on screen to make room for itself.
+
+On the wire, `control.Port` has a custom `UnmarshalJSON` that also accepts a bare number. Ports went
+out as plain integers before labels existed, and a supervisor started with that build keeps sending
+them for as long as it runs; without this a newer dashboard would fail to decode a snapshot from a
+supervisor that is working perfectly well.
+
+The card's detail slot carries **ports and nothing else**, blank when there are none. It briefly
+carried a status fallback (`pid 1234`, `waiting`), which put two unrelated kinds of value in one
+place and read as noise. The glyph already carries status, the restart counter is folded into the
+name line, and the PID lives in the zoomed view's title bar.
 
 ### Pinning
 

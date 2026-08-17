@@ -382,38 +382,32 @@ func TestRememberedCellStyleToleratesGarbage(t *testing.T) {
 // to fit the widest detail — so an unbounded one widens every cell, and then
 // narrows again as services change state, reflowing the grid exactly when it
 // is changing fastest. Every detail is therefore short and fixed-ish.
-func TestCellDetailIsBounded(t *testing.T) {
-	const limit = 12 // "pid 1234567" is the longest realistic case
+// Detail lines are bounded in width. Column width is sized to fit the widest
+// detail, so anything unbounded there widens every cell in the grid -- which is
+// what "waits <dependency>" used to do, reflowing the layout as services
+// started. Port labels are short by construction; this holds them to it.
+func TestCardDetailsAreBounded(t *testing.T) {
+	// A label capped at maxPortLabel, plus " :", plus a five-digit port.
+	const limit = maxPortLabel + 2 + 5
 
 	cells := []GridCell{
-		{Status: process.StatusRunning, PID: 1234567},
-		{Status: process.StatusRunning, HasHealth: true, Healthy: false},
-		{Status: process.StatusRunning},
+		{Status: process.StatusRunning, Ports: []process.Port{{Number: 65535, Label: "verylonglabel"}}},
+		{Status: process.StatusRunning, Ports: []process.Port{{Number: 1}, {Number: 2}, {Number: 3}, {Number: 4}, {Number: 5}, {Number: 6}, {Number: 7}, {Number: 8}, {Number: 9}, {Number: 10}}},
 		{Status: process.StatusWaiting},
-		{Status: process.StatusStarting},
-		{Status: process.StatusRestarting, RestartCount: 3, MaxRestarts: 5},
-		{Status: process.StatusRestarting, RestartCount: 12},
-		{Status: process.StatusCrashed},
 		{Status: process.StatusStopped},
 	}
 	for _, c := range cells {
-		if got := cellDetail(c); lipglossWidth(got) > limit {
-			t.Errorf("detail for %v is %q (%d wide), want at most %d",
-				c.Status, got, lipglossWidth(got), limit)
+		for _, line := range cardDetails(c, maxPortLines, 0) {
+			if lipglossWidth(line) > limit {
+				t.Errorf("detail %q is %d wide, want at most %d", line, lipglossWidth(line), limit)
+			}
 		}
 	}
 }
 
-// A service waiting on a long-named dependency must not widen the grid.
-func TestWaitingDetailDoesNotDependOnServiceNames(t *testing.T) {
-	short := GridCell{Name: "api", Status: process.StatusWaiting}
-	long := GridCell{Name: "api", Status: process.StatusWaiting}
-
-	if cellDetail(short) != "waiting" || cellDetail(long) != "waiting" {
-		t.Fatalf("waiting detail = %q / %q, want %q", cellDetail(short), cellDetail(long), "waiting")
-	}
-
-	// The rendered grid is the same width whether services are waiting or up.
+// The grid is the same width whatever state services are in, so it does not
+// reflow as they start.
+func TestCardWidthIsStableAcrossStatus(t *testing.T) {
 	build := func(status process.Status) int {
 		g := NewGrid()
 		g.SetSize(100, 40)
@@ -435,5 +429,229 @@ func TestWaitingDetailDoesNotDependOnServiceNames(t *testing.T) {
 	if waiting != running {
 		t.Errorf("grid is %d wide while waiting and %d while running; it reflows as services start",
 			waiting, running)
+	}
+}
+
+func portCell(name string, ports ...int) GridCell {
+	p := make([]process.Port, len(ports))
+	for i, n := range ports {
+		p[i] = process.Port{Number: n}
+	}
+	return GridCell{Key: name, Name: name, Status: process.StatusRunning, PID: 999, Ports: p}
+}
+
+// Cards list the ports beneath the name, one per line, and every cell in a row
+// pads to the tallest so the grid stays rectangular.
+func TestCardRowHeightMatchesTheMostPorts(t *testing.T) {
+	g := NewGrid()
+	g.SetSize(100, 40)
+	g.SetCellStyle(CellCard)
+	g.SetGroups([]GridGroup{{Cells: []GridCell{
+		portCell("one", 3000),
+		portCell("three", 4000, 4001, 4002),
+		portCell("none"),
+	}}})
+
+	lines := strings.Split(g.View(), "\n")
+	if len(lines) != 6 {
+		t.Fatalf("row rendered %d lines, want 6 (border, name, 3 ports, border):\n%s", len(lines), g.View())
+	}
+
+	// Every line is the same width: the short cells padded rather than stopping.
+	width := lipglossWidth(lines[0])
+	for i, l := range lines {
+		if w := lipglossWidth(l); w != width {
+			t.Errorf("line %d is %d wide, want %d — a cell did not pad to the row:\n%s", i, w, width, g.View())
+		}
+	}
+
+	// The tall cell's third port is present; the short ones are blank there.
+	if !strings.Contains(lines[4], ":4002") {
+		t.Errorf("third port missing from the tall cell:\n%s", g.View())
+	}
+	if strings.Contains(lines[4], ":3000") {
+		t.Errorf("short cell repeated its port on a padding line:\n%s", g.View())
+	}
+}
+
+// Height is per row, not per grid: a tall row must not stretch the others.
+func TestCardRowsAreIndependentlyTall(t *testing.T) {
+	g := NewGrid()
+	g.SetSize(46, 40) // narrow enough for two cells per row
+	g.SetCellStyle(CellCard)
+	g.SetGroups([]GridGroup{{Cells: []GridCell{
+		portCell("a", 1), portCell("b", 1, 2, 3), // row 1: 3 detail lines
+		portCell("c", 1), portCell("d", 1), // row 2: 1 detail line
+	}}})
+
+	l := g.layout()
+	if len(l.rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(l.rows))
+	}
+	var heights []int
+	for _, s := range l.specs {
+		if s.kind == lineRow {
+			heights = append(heights, s.height)
+		}
+	}
+	if len(heights) != 2 || heights[0] != 6 || heights[1] != 4 {
+		t.Errorf("row heights = %v, want [6 4]", heights)
+	}
+}
+
+// A service listening on a great many ports must not set the height of the
+// whole screen.
+func TestCardPortsAreCapped(t *testing.T) {
+	g := NewGrid()
+	g.SetSize(100, 40)
+	g.SetCellStyle(CellCard)
+	g.SetGroups([]GridGroup{{Cells: []GridCell{portCell("many", 1, 2, 3, 4, 5, 6, 7, 8)}}})
+
+	view := g.View()
+	if lines := strings.Count(view, "\n") + 1; lines != 3+maxPortLines {
+		t.Errorf("card is %d lines, want %d", lines, 3+maxPortLines)
+	}
+	if !strings.Contains(view, "+5 more") {
+		t.Errorf("overflow not summarised:\n%s", view)
+	}
+}
+
+// With no ports the detail area is blank. That slot means one thing — where to
+// reach this service — and a PID in it is a different kind of value in the same
+// place, which is what made it read as noise. The glyph already carries the
+// status, and the PID is in the zoomed view.
+func TestCardWithoutPortsIsBlank(t *testing.T) {
+	for _, c := range []GridCell{
+		{Name: "x", Status: process.StatusRunning, PID: 4242},
+		{Name: "x", Status: process.StatusWaiting},
+		{Name: "x", Status: process.StatusStopped},
+		{Name: "x", Status: process.StatusRunning, HasHealth: true},
+	} {
+		if got := cardDetails(c, maxPortLines, 0); len(got) != 0 {
+			t.Errorf("cardDetails(%v) = %v, want nothing", c.Status, got)
+		}
+	}
+
+	// And no PID reaches the rendered card.
+	g := NewGrid()
+	g.SetSize(80, 40)
+	g.SetCellStyle(CellCard)
+	g.SetGroups([]GridGroup{{Cells: []GridCell{
+		{Name: "quiet", Status: process.StatusRunning, PID: 4242},
+	}}})
+	if view := g.View(); strings.Contains(view, "4242") || strings.Contains(view, "pid") {
+		t.Errorf("card showed a PID:\n%s", view)
+	}
+}
+
+// Navigation reads the same layout as rendering, so variable row heights must
+// not break moving between rows.
+func TestMoveAcrossVariableHeightRows(t *testing.T) {
+	g := NewGrid()
+	g.SetSize(46, 40)
+	g.SetCellStyle(CellCard)
+	g.SetGroups([]GridGroup{{Cells: []GridCell{
+		portCell("a", 1), portCell("b", 1, 2, 3),
+		portCell("c", 1), portCell("d", 1),
+	}}})
+
+	if got := g.SelectedKey(); got != "a" {
+		t.Fatalf("setup: selection = %q, want a", got)
+	}
+	g.Move(0, 1)
+	if got := g.SelectedKey(); got != "c" {
+		t.Errorf("down from a tall row landed on %q, want c", got)
+	}
+	g.Move(0, -1)
+	if got := g.SelectedKey(); got != "a" {
+		t.Errorf("back up landed on %q, want a", got)
+	}
+}
+
+// Ports must not push a card past the terminal width.
+func TestCardPortsFitWidth(t *testing.T) {
+	g := NewGrid()
+	g.SetSize(80, 40)
+	g.SetCellStyle(CellCard)
+	g.SetGroups([]GridGroup{{Cells: []GridCell{
+		portCell("postgres", 40204), portCell("web", 40201, 24678), portCell("api", 40200),
+	}}})
+	for i, line := range strings.Split(g.View(), "\n") {
+		if w := lipglossWidth(line); w > 80 {
+			t.Errorf("line %d is %d wide, want at most 80: %q", i, w, line)
+		}
+	}
+}
+
+// The colons line up across the whole grid, not just within one card. Most
+// services list a single port, so per-card alignment would be a no-op for
+// exactly the case that needed fixing.
+func TestPortColonsAlignAcrossTheGrid(t *testing.T) {
+	g := NewGrid()
+	g.SetSize(80, 24)
+	g.SetCellStyle(CellCard)
+	g.SetGroups([]GridGroup{{
+		Title: "p",
+		Cells: []GridCell{
+			{Name: "api", Status: process.StatusRunning, Ports: []process.Port{{Number: 40200, Label: "api"}}},
+			{Name: "extapi", Status: process.StatusRunning, Ports: []process.Port{{Number: 40210, Label: "extapi"}}},
+			{Name: "cache", Status: process.StatusRunning, Ports: []process.Port{{Number: 6379}}},
+		},
+	}})
+
+	l := g.layout()
+	if l.labelWide != 6 { // "extapi", the widest label on screen
+		t.Fatalf("labelWide = %d, want 6", l.labelWide)
+	}
+
+	// Every detail line puts its colon in the same column, labelled or not.
+	want := -1
+	for _, c := range g.visibleGroups()[0].Cells {
+		for _, line := range cardDetails(c, maxPortLines, l.labelWide) {
+			at := strings.Index(line, ":")
+			if want == -1 {
+				want = at
+			}
+			if at != want {
+				t.Errorf("%q has its colon at %d, want %d", line, at, want)
+			}
+		}
+	}
+	if want != 7 { // 6 label columns plus the space before the colon
+		t.Errorf("colon column = %d, want 7", want)
+	}
+}
+
+// A grid whose ports are all unlabelled shouldn't indent past a margin nothing
+// occupies.
+func TestUnlabelledPortsAreNotIndented(t *testing.T) {
+	g := NewGrid()
+	g.SetSize(80, 24)
+	g.SetCellStyle(CellCard)
+	g.SetGroups([]GridGroup{{
+		Cells: []GridCell{{Name: "api", Status: process.StatusRunning, Ports: []process.Port{{Number: 8080}}}},
+	}})
+
+	l := g.layout()
+	if l.labelWide != 0 {
+		t.Fatalf("labelWide = %d, want 0 when nothing is labelled", l.labelWide)
+	}
+	if got := cardDetails(g.visibleGroups()[0].Cells[0], maxPortLines, l.labelWide); got[0] != ":8080" {
+		t.Errorf("detail = %q, want %q", got[0], ":8080")
+	}
+}
+
+// The width is measured from the ports actually on screen. A label hidden
+// behind "+N more" must not indent every card to make room for itself.
+func TestHiddenPortsDoNotSetTheLabelWidth(t *testing.T) {
+	ports := []process.Port{{Number: 1, Label: "a"}, {Number: 2, Label: "b"}, {Number: 3, Label: "c"}}
+	ports = append(ports, process.Port{Number: 4, Label: "verylong"})
+	for i := 5; i < 10; i++ {
+		ports = append(ports, process.Port{Number: i, Label: "alsolong"})
+	}
+
+	groups := []GridGroup{{Cells: []GridCell{{Name: "x", Status: process.StatusRunning, Ports: ports}}}}
+	if got := portLabelWidth(groups); got != 1 {
+		t.Errorf("labelWide = %d, want 1 — only a, b, c are shown", got)
 	}
 }

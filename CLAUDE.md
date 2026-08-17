@@ -30,6 +30,7 @@ cmd/
   version.go                   # Version constant + `pairin version`
 internal/
   browse/browse.go             # Directory listing for the dashboard's project picker
+  ports/ports.go               # Which TCP ports a service is listening on, read from /proc
   catalog/catalog.go           # User's registered projects: $XDG_CONFIG_HOME/pairin/projects.toml
   hub/hub.go                   # Connections to every supervisor on the host; tagged events, per-instance reconnect
   launcher/launcher.go         # Spawning detached supervisors; shared by the CLI and the dashboard
@@ -149,6 +150,7 @@ max_restarts = 5
 - Generation counter on Service prevents stale goroutines from updating state after a restart
 - Ring buffer avoids unbounded memory growth from long-running services
 - On-disk per-service log files (`.pairin/logs/<name>.log`, rotated past 10 MiB) let a reattached TUI preload history via `tui/tail.go`
+- Listening ports are discovered from the kernel by process group, not declared; one scan covers every service
 - Healthcheck poller uses the same generation guard to prevent stale goroutines after restart
 - Auto-restart uses the same generation guard — if a manual restart or stop happens during the cooldown sleep, the stale auto-restart goroutine exits without acting
 - The TUI's `Backend` interface decouples it from the manager: a local `*process.Manager` and a remote `*control.Client` are interchangeable, which is why the same Bubble Tea model handles both modes

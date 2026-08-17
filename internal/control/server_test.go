@@ -368,3 +368,32 @@ func TestSubscriptionSurvivesReconnect(t *testing.T) {
 type sinkFunc func(tea.Msg)
 
 func (f sinkFunc) Send(msg tea.Msg) { f(msg) }
+
+// Ports went out as bare integers before labels existed, and a supervisor
+// started with that build keeps sending them for as long as it runs. A newer
+// dashboard has to keep decoding them, or it fails to read a snapshot from a
+// supervisor that is working perfectly well.
+func TestPortDecodingAcceptsBareNumbers(t *testing.T) {
+	var snap Snapshot
+	old := `{"config_path":"/p","project_name":"t","services":[{"name":"api","ports":[40200,9229]}]}`
+	if err := json.Unmarshal([]byte(old), &snap); err != nil {
+		t.Fatalf("a pre-labels snapshot failed to decode: %v", err)
+	}
+	got := snap.Services[0].Ports
+	if len(got) != 2 || got[0].Number != 40200 || got[1].Number != 9229 {
+		t.Fatalf("bare ports decoded as %+v", got)
+	}
+	if got[0].Label != "" {
+		t.Errorf("a bare port came back with a label: %+v", got[0])
+	}
+
+	// And the labelled form round trips.
+	var evt PortsEvent
+	newer := `{"service":"api","ports":[{"port":5432,"label":"db"},7000]}`
+	if err := json.Unmarshal([]byte(newer), &evt); err != nil {
+		t.Fatalf("labelled ports failed to decode: %v", err)
+	}
+	if len(evt.Ports) != 2 || evt.Ports[0].Label != "db" || evt.Ports[1].Number != 7000 {
+		t.Fatalf("mixed ports decoded as %+v", evt.Ports)
+	}
+}

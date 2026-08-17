@@ -6,11 +6,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
+	"sort"
 	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/apsdsm/pairin/internal/config"
 	"github.com/apsdsm/pairin/internal/state"
 )
@@ -1299,5 +1304,200 @@ func TestClearLogsKeepsAppendWritesContiguous(t *testing.T) {
 	}
 	if string(data) != "after clearing\n" {
 		t.Errorf("log holds %q, want just the line written after clearing", data)
+	}
+}
+
+// Ports are discovered from the kernel rather than declared, so this binds a
+// real socket and checks it reaches the service the manager reports.
+func TestRefreshPortsDiscoversARealListener(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("port discovery reads /proc; only implemented for Linux")
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	want := ln.Addr().(*net.TCPAddr).Port
+
+	pgid, err := syscall.Getpgid(os.Getpid())
+	if err != nil {
+		t.Fatalf("getpgid: %v", err)
+	}
+
+	mgr := newTestManager([]config.Service{{Name: "listener"}, {Name: "silent"}})
+	// Point the first service at this process's group; leave the second with
+	// no process group at all, as a stopped service has.
+	mgr.Services[0].PGID = pgid
+
+	var mu sync.Mutex
+	var msgs []PortsMsg
+	mgr.SetSink(sinkFunc(func(m tea.Msg) {
+		if pm, ok := m.(PortsMsg); ok {
+			mu.Lock()
+			msgs = append(msgs, pm)
+			mu.Unlock()
+		}
+	}))
+
+	mgr.refreshPorts()
+
+	found := mgr.Services[0].View().Ports
+	if !containsPort(found, want) {
+		t.Errorf("service ports = %v, want them to include %d", found, want)
+	}
+	if got := mgr.Services[1].View().Ports; len(got) != 0 {
+		t.Errorf("a service with no process group reported ports %v", got)
+	}
+
+	mu.Lock()
+	first := len(msgs)
+	mu.Unlock()
+	if first == 0 {
+		t.Fatal("discovering ports published no event")
+	}
+
+	// Nothing changed, so a second pass must stay quiet rather than re-announce
+	// the same ports to every connected client every poll.
+	mgr.refreshPorts()
+	mu.Lock()
+	second := len(msgs)
+	mu.Unlock()
+	if second != first {
+		t.Errorf("unchanged ports published %d more events", second-first)
+	}
+}
+
+func containsPort(ports []Port, want int) bool {
+	for _, p := range ports {
+		if p.Number == want {
+			return true
+		}
+	}
+	return false
+}
+
+type sinkFunc func(tea.Msg)
+
+func (f sinkFunc) Send(msg tea.Msg) { f(msg) }
+
+// exposes covers what discovery cannot see — a docker service binds its ports
+// in the daemon, which is in nobody's process group but its own.
+func TestExposedPortsAreMergedWithDiscovered(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("port discovery reads /proc; only implemented for Linux")
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	discovered := ln.Addr().(*net.TCPAddr).Port
+
+	pgid, err := syscall.Getpgid(os.Getpid())
+	if err != nil {
+		t.Fatalf("getpgid: %v", err)
+	}
+
+	mgr := newTestManager([]config.Service{
+		{Name: "docker", Exposes: config.ExposeList{{Port: 5432}, {Label: "cache", Port: 9000}}},
+		{Name: "mixed", Exposes: config.ExposeList{{Label: "db", Port: 5432}}},
+	})
+	mgr.Services[0].PGID = pgid
+	mgr.Services[1].PGID = pgid
+	mgr.refreshPorts()
+
+	// Declared ports show even though this process group binds neither.
+	got := mgr.Services[0].View().Ports
+	for _, want := range []int{5432, 9000} {
+		if !containsPort(got, want) {
+			t.Errorf("declared port %d missing from %v", want, got)
+		}
+	}
+
+	// And they add to what was found rather than replacing it: hiding a port
+	// the service is genuinely listening on would be a lie.
+	got = mgr.Services[1].View().Ports
+	if !containsPort(got, discovered) {
+		t.Errorf("discovered port %d was lost when exposes was set: %v", discovered, got)
+	}
+	if !containsPort(got, 5432) {
+		t.Errorf("declared port missing: %v", got)
+	}
+	if !sort.SliceIsSorted(got, func(i, j int) bool { return got[i].Number < got[j].Number }) {
+		t.Errorf("ports are not sorted: %v", got)
+	}
+
+	// Labels come from the config and attach to discovered ports too.
+	for _, p := range got {
+		if p.Number == 5432 && p.Label != "db" {
+			t.Errorf("declared label lost: %+v", p)
+		}
+	}
+}
+
+// A stopped service exposes nothing: a port on a card means you can reach the
+// service there, and that has to stay true for declared ports too.
+func TestExposedPortsOnlyWhileRunning(t *testing.T) {
+	mgr := newTestManager([]config.Service{{Name: "down", Exposes: config.ExposeList{{Port: 5432}}}})
+	mgr.Services[0].PGID = 0 // as a stopped service has
+	mgr.refreshPorts()
+
+	if got := mgr.Services[0].View().Ports; len(got) != 0 {
+		t.Errorf("a stopped service reported ports %v", got)
+	}
+}
+
+func TestMergePortsDeduplicates(t *testing.T) {
+	got := mergePorts([]int{3000, 8080}, config.ExposeList{
+		{Label: "web", Port: 8080}, {Label: "db", Port: 5432}, {Port: 0}, {Port: -1},
+	})
+	want := []Port{
+		{Number: 3000},
+		{Number: 5432, Label: "db"},
+		{Number: 8080, Label: "web"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("mergePorts = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("mergePorts = %v, want %v", got, want)
+		}
+	}
+}
+
+// A config warning has to reach the on-disk log, not just the in-memory ring
+// buffer: a TUI attaching later preloads from the file and only sees events
+// after that, so a ring-buffer-only warning is invisible to everyone who wasn't
+// already attached when the supervisor started.
+func TestConfigWarningsReachTheServiceLog(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	cfg := &config.Config{
+		Path:     filepath.Join(tmpDir, ".pairinrc.toml"),
+		Services: []config.Service{{Name: "web", Dir: tmpDir, Cmd: "echo hi"}},
+		Warnings: []config.Warning{
+			{Service: "web", Message: `ignoring exposes entry: "minio" has no port number in it`},
+			{Service: "nonexistent", Message: "dropped on the floor"},
+		},
+	}
+	m := NewManager(cfg)
+
+	m.startService(0)
+	defer m.StopAll()
+	time.Sleep(200 * time.Millisecond)
+
+	data, err := os.ReadFile(m.Services[0].LogFile)
+	if err != nil {
+		t.Fatalf("reading log: %v", err)
+	}
+	if !strings.Contains(string(data), `[pairin] ignoring exposes entry: "minio"`) {
+		t.Errorf("warning missing from %s:\n%s", m.Services[0].LogFile, data)
+	}
+	if strings.Contains(string(data), "dropped on the floor") {
+		t.Error("a warning for another service ended up in web's log")
 	}
 }

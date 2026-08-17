@@ -52,6 +52,10 @@ type GridCell struct {
 	RestartCount int
 	MaxRestarts  int
 	PID          int
+
+	// Ports the service is listening on, discovered from the kernel. In card
+	// style these are listed under the name, one per line.
+	Ports []process.Port
 }
 
 // key is the cell's identity for selection purposes.
@@ -136,9 +140,10 @@ const (
 // lineSpec is one laid-out line of the grid. A lineRow may render to several
 // screen lines when cells are boxed.
 type lineSpec struct {
-	kind  lineKind
-	group int
-	cells []int // flat cell indices, for lineRow
+	kind   lineKind
+	group  int
+	cells  []int // flat cell indices, for lineRow
+	height int   // screen lines this row occupies, for lineRow
 }
 
 // gridLayout is the geometry of the grid: which cells sit in which visual row,
@@ -151,6 +156,10 @@ type lineSpec struct {
 type gridLayout struct {
 	cols     int
 	cellWide int
+
+	// labelWide is the width port labels are padded to, so the colons line up
+	// down the whole grid rather than only within a card.
+	labelWide int
 
 	cells []GridCell // visible cells, flat, in render order
 	specs []lineSpec
@@ -406,15 +415,18 @@ func abs(n int) int {
 func (g Grid) layout() gridLayout {
 	groups := g.visibleGroups()
 
+	// Measured before the details themselves, since it's what they pad to.
+	labelWide := portLabelWidth(groups)
+
 	var labels []string
 	for _, grp := range groups {
 		for _, c := range grp.Cells {
 			labels = append(labels, c.Name)
-			// A card's second line can be wider than the service's name
-			// ("pid 2994109" against "api"), so it has to be measured too or
-			// it gets truncated in cells that otherwise have room to spare.
+			// A card's detail lines can be wider than the service's name
+			// ("pid 2994109" against "api"), so they have to be measured too or
+			// they get truncated in cells that otherwise have room to spare.
 			if g.cellStyle == CellCard {
-				labels = append(labels, cellDetail(c))
+				labels = append(labels, cardDetails(c, maxPortLines, labelWide)...)
 			}
 		}
 	}
@@ -429,11 +441,9 @@ func (g Grid) layout() gridLayout {
 		}
 	}
 
-	l := gridLayout{cols: cols, cellWide: cellWide}
+	l := gridLayout{cols: cols, cellWide: cellWide, labelWide: labelWide}
 	showTitles := len(groups) > 1 || (len(groups) == 1 && groups[0].Title != "")
 	line := 0
-	rowHeight := g.rowHeight()
-
 	for gi, grp := range groups {
 		if showTitles {
 			if gi > 0 {
@@ -454,7 +464,12 @@ func (g Grid) layout() gridLayout {
 			if end > len(grp.Cells) {
 				end = len(grp.Cells)
 			}
-			spec := lineSpec{kind: lineRow, group: gi}
+			// Height is per row, not per grid: a row containing a service with
+			// three ports is taller than one where every service has a single
+			// port, and each cell in it pads to match.
+			rowHeight := g.rowHeight(grp.Cells[start:end])
+
+			spec := lineSpec{kind: lineRow, group: gi, height: rowHeight}
 			var rowCells []int
 			for i := start; i < end; i++ {
 				flat := len(l.cells)
@@ -475,13 +490,40 @@ func (g Grid) layout() gridLayout {
 	return l
 }
 
-// rowHeight is how many screen lines one row of cells occupies.
-func (g Grid) rowHeight() int {
+// maxPortLines caps how many ports one card lists. A service can legitimately
+// listen on a dozen ports, and one of those must not be allowed to set the
+// height of every row on screen.
+const maxPortLines = 4
+
+// cardDetailLines is how many detail lines a card needs for one cell: its
+// ports, one per line, or a single status line when it has none.
+func cardDetailLines(c GridCell) int {
+	n := len(c.Ports)
+	if n == 0 {
+		return 1
+	}
+	if n > maxPortLines {
+		// The last line becomes "+N more", so the cap is the total.
+		return maxPortLines
+	}
+	return n
+}
+
+// rowHeight is how many screen lines a row of cells occupies. Rows are ragged
+// in card style — a service listening on three ports needs three lines — so
+// every cell in a row is padded to the tallest, keeping the grid on a grid.
+func (g Grid) rowHeight(cells []GridCell) int {
 	switch g.cellStyle {
 	case CellBoxed:
 		return 3 // top border, content, bottom border
 	case CellCard:
-		return 4 // top border, name, detail, bottom border
+		detail := 1
+		for _, c := range cells {
+			if n := cardDetailLines(c); n > detail {
+				detail = n
+			}
+		}
+		return 3 + detail // top border, name, detail lines, bottom border
 	default:
 		return 1
 	}
@@ -696,33 +738,6 @@ func cellLabel(c GridCell, avail int) string {
 	return glyphStyle.Render(glyph) + " " + nameStyle.Render(label)
 }
 
-// cellDetail is the second line of a card: what the glyph can't say on its own.
-func cellDetail(c GridCell) string {
-	switch c.Status {
-	case process.StatusRunning:
-		if c.HasHealth && !c.Healthy {
-			return "unhealthy"
-		}
-		if c.PID > 0 {
-			return fmt.Sprintf("pid %d", c.PID)
-		}
-		return "running"
-	case process.StatusRestarting:
-		if c.MaxRestarts > 0 {
-			return fmt.Sprintf("retry %d/%d", c.RestartCount, c.MaxRestarts)
-		}
-		return fmt.Sprintf("retry #%d", c.RestartCount)
-	case process.StatusWaiting:
-		// Deliberately not "waits <dependency>": column width is sized to fit
-		// the widest detail, so an unbounded service name widened every cell —
-		// and then narrowed again as services started, reflowing the whole grid
-		// exactly when it was changing fastest.
-		return "waiting"
-	default:
-		return c.Status.String()
-	}
-}
-
 // boxChars returns the border pieces for a cell. The selected cell gets a heavy
 // border as well as the caret — the caret alone is easy to lose among twenty
 // boxes, and a heavy edge reads at a glance without inverting a whole block.
@@ -736,7 +751,7 @@ func boxChars(selected bool) (tl, tr, bl, br, h, v string, style lipgloss.Style)
 // renderBoxedRow draws one row of boxed cells, returning its screen lines.
 // Boxes are separated by a gutter: butted together, adjacent borders read as a
 // doubled rule heavier than the boxes themselves.
-func renderBoxedRow(cells []GridCell, selectedAt int, cellWide int, card bool) []string {
+func renderBoxedRow(cells []GridCell, selectedAt int, cellWide int, card bool, height, labelWide int) []string {
 	const gutter = 1
 	boxWide := cellWide - gutter
 	inner := boxWide - 2
@@ -745,10 +760,14 @@ func renderBoxedRow(cells []GridCell, selectedAt int, cellWide int, card bool) [
 		boxWide = inner + 2
 	}
 
-	height := 3
-	if card {
-		height = 4
+	if height < 3 {
+		height = 3
 	}
+	if !card {
+		height = 3
+	}
+	detailLines := height - 3
+
 	lines := make([]string, height)
 
 	for i, c := range cells {
@@ -766,14 +785,115 @@ func renderBoxedRow(cells []GridCell, selectedAt int, cellWide int, card bool) [
 
 		lines[0] += top + strings.Repeat(" ", gutter)
 		lines[1] += name + strings.Repeat(" ", gutter)
+
 		if card {
-			detail := DimStyle.Render(truncate(cellDetail(c), inner-3))
-			lines[2] += style.Render(v) + padTo("   "+detail, inner) + style.Render(v) + strings.Repeat(" ", gutter)
+			// Cells shorter than the row pad with blank interior, so the row
+			// stays rectangular however ragged the ports are.
+			details := cardDetails(c, detailLines, labelWide)
+			for d := 0; d < detailLines; d++ {
+				text := ""
+				if d < len(details) {
+					text = "   " + DimStyle.Render(truncate(details[d], inner-3))
+				}
+				lines[2+d] += style.Render(v) + padTo(text, inner) + style.Render(v) + strings.Repeat(" ", gutter)
+			}
 		}
 		lines[height-1] += bottom + strings.Repeat(" ", gutter)
 	}
 	return lines
 }
+
+// cardDetails is what goes under a card's name: the ports it is listening on,
+// one per line. The last line absorbs any overflow so a service with a dozen
+// ports doesn't stretch the row.
+//
+// Nothing when there are no ports. The slot means one thing — where to reach
+// this service — and filling it with a PID when that answer isn't available
+// puts two unrelated kinds of value in the same place, which reads as noise.
+// The glyph already carries the status, and the PID is in the zoomed view.
+//
+// labelWide pads the labels so the colons line up; see portLabelWidth.
+func cardDetails(c GridCell, room, labelWide int) []string {
+	shown := shownPorts(c, room)
+	if len(shown) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(shown)+1)
+	for _, p := range shown {
+		out = append(out, portLabel(p, labelWide))
+	}
+	if n := len(c.Ports) - len(shown); n > 0 {
+		// Deliberately unpadded: it isn't a port, so lining it up with them
+		// would imply it was one.
+		out = append(out, fmt.Sprintf("+%d more", n))
+	}
+	return out
+}
+
+// shownPorts is the ports a card actually lists, given the lines it has room
+// for. When they don't all fit, the last line goes to "+N more" instead.
+//
+// Split out because the width the labels pad to has to be measured from the
+// ports that are actually rendered — measuring hidden ones would indent every
+// card on screen to accommodate a label nobody can see.
+func shownPorts(c GridCell, room int) []process.Port {
+	if room < 1 {
+		room = 1
+	}
+	if len(c.Ports) <= room {
+		return c.Ports
+	}
+	return c.Ports[:room-1]
+}
+
+// portLabelWidth is the width every port label is padded to, so that the
+// colons form one vertical line down the grid rather than one per card.
+// Aligning per card would do nothing for the common case — most services list a
+// single port, and what doesn't line up is the card above and the card below.
+//
+// Measured across the whole grid because every column is the same width, so a
+// single figure aligns the rows as well as the columns. Zero when no port on
+// screen has a label, which leaves bare ports flush against the border instead
+// of indenting them past a margin nothing occupies.
+func portLabelWidth(groups []GridGroup) int {
+	w := 0
+	for _, grp := range groups {
+		for _, c := range grp.Cells {
+			for _, p := range shownPorts(c, maxPortLines) {
+				if n := lipgloss.Width(truncate(p.Label, maxPortLabel)); n > w {
+					w = n
+				}
+			}
+		}
+	}
+	return w
+}
+
+// maxPortLabel bounds the label shown beside a port. Column width is sized to
+// fit the widest detail, so an unbounded label would widen every cell in the
+// grid — the same trap "waits <dependency>" fell into. Eight fits the names
+// worth writing ("postgres", "frontend") and still bounds a detail line at
+// 8 + " :" + 5 digits = 15.
+const maxPortLabel = 8
+
+// portLabel renders one port, with its label when it has one: "db :5432".
+//
+// labelWide right-pads the label so the colon lands in the same column on every
+// line; pass 0 to render it flush, which is what a single port on its own line
+// wants.
+func portLabel(p process.Port, labelWide int) string {
+	label := truncate(p.Label, maxPortLabel)
+	if pad := labelWide - lipgloss.Width(label); pad > 0 {
+		label += strings.Repeat(" ", pad)
+	}
+	if label == "" {
+		return fmt.Sprintf(":%d", p.Number)
+	}
+	return fmt.Sprintf("%s :%d", label, p.Number)
+}
+
+
 
 // padTo pads to a display width, ignoring the styling escapes inside s.
 func padTo(s string, n int) string {
@@ -836,7 +956,7 @@ func (g Grid) View() string {
 				lines = append(lines, row.String())
 				continue
 			}
-			lines = append(lines, renderBoxedRow(cells, selectedAt, l.cellWide, g.cellStyle == CellCard)...)
+			lines = append(lines, renderBoxedRow(cells, selectedAt, l.cellWide, g.cellStyle == CellCard, spec.height, l.labelWide)...)
 		}
 	}
 
@@ -918,6 +1038,7 @@ func GridCellsFor(svcs []*process.Service) []GridCell {
 			RestartCount: v.RestartCount,
 			MaxRestarts:  v.MaxRestarts,
 			PID:          v.PID,
+			Ports:        v.Ports,
 		})
 	}
 	return cells

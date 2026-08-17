@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/apsdsm/pairin/internal/config"
 	"github.com/apsdsm/pairin/internal/crash"
+	"github.com/apsdsm/pairin/internal/ports"
 	"github.com/apsdsm/pairin/internal/state"
 )
 
@@ -101,6 +103,11 @@ type Service struct {
 	Branch  string
 	Logs    *RingBuffer
 	Healthy bool
+
+	// Ports are the TCP ports this service is listening on, discovered from the
+	// kernel rather than declared. A service that binds nothing of its own has
+	// none — a `docker compose up` service binds its ports in the daemon.
+	Ports []Port
 	RestartCount int // number of auto-restarts since last manual start/restart
 
 	// LogFile is the absolute path of the service's stdout/stderr log.
@@ -111,6 +118,10 @@ type Service struct {
 	// have an *exec.Cmd we can Wait on; liveness is polled instead and they
 	// cannot be restarted in phase 1.
 	Adopted bool
+
+	// configWarnings are survivable config problems, written into the log each
+	// time the service starts.
+	configWarnings []string
 
 	cmd          *exec.Cmd
 	generation   int
@@ -140,6 +151,8 @@ type ServiceView struct {
 	Branch       string
 	Status       Status
 	PID          int
+	PGID         int
+	Ports        []Port
 	Healthy      bool
 	HasHealth    bool
 	Adopted      bool
@@ -162,6 +175,8 @@ func (s *Service) View() ServiceView {
 		Branch:       s.Branch,
 		Status:       s.Status,
 		PID:          s.PID,
+		PGID:         s.PGID,
+		Ports:        append([]Port(nil), s.Ports...),
 		Healthy:      s.Healthy,
 		HasHealth:    s.Config.Healthcheck != "",
 		Adopted:      s.Adopted,
@@ -200,6 +215,37 @@ func (s *Service) AppendLog(line string) {
 	s.Logs.Add(line)
 }
 
+// SetPorts records the ports a service is listening on. Returns true if they
+// changed, so a caller can avoid publishing an event every poll.
+func (s *Service) SetPorts(p []Port) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if samePorts(s.Ports, p) {
+		return false
+	}
+	s.Ports = append([]Port(nil), p...)
+	return true
+}
+
+// ApplyPorts records ports on a mirror service.
+func (s *Service) ApplyPorts(p []Port) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Ports = append([]Port(nil), p...)
+}
+
+func samePorts(a, b []Port) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // ClearLogBuffer empties the in-memory history.
 func (s *Service) ClearLogBuffer() {
 	s.mu.Lock()
@@ -221,6 +267,7 @@ func (s *Service) UpdateMirror(v ServiceView) {
 	s.Adopted = v.Adopted
 	s.LogFile = v.LogFile
 	s.RestartCount = v.RestartCount
+	s.Ports = append([]Port(nil), v.Ports...)
 }
 
 // NewMirrorService creates a Service stub for client-side use. It has no
@@ -278,6 +325,17 @@ func NewManager(cfg *config.Config) *Manager {
 		}
 		nameToIdx[sc.Name] = i
 	}
+
+	// Config warnings are held until the service starts, then written into its
+	// log file — which is where someone would look to find out why a service
+	// isn't behaving as they wrote it, and unlike the in-memory buffer it
+	// survives for a TUI that attaches later.
+	for _, w := range cfg.Warnings {
+		if i, ok := nameToIdx[w.Service]; ok {
+			services[i].configWarnings = append(services[i].configWarnings, w.Message)
+		}
+	}
+
 	return &Manager{
 		Services:   services,
 		configPath: cfg.Path,
@@ -367,8 +425,99 @@ func (m *Manager) StartAll() tea.Cmd {
 				m.send(StatusMsg{Index: i, Status: StatusWaiting})
 			}
 		}
+		go m.watchPorts()
 		return AllStartedMsg{}
 	}
+}
+
+// portPollInterval is how often the kernel is asked which ports each service is
+// listening on. Ports settle shortly after a service starts and rarely move
+// after that, so this only needs to be brisk enough to catch startup.
+const portPollInterval = 2 * time.Second
+
+// watchPorts keeps each service's listening ports up to date.
+//
+// One goroutine covers every service rather than one each: the scan walks /proc
+// once and answers for all of them, so per-service pollers would multiply the
+// most expensive part of the work by the number of services.
+func (m *Manager) watchPorts() {
+	defer crash.Guard("ports watcher")
+
+	ticker := time.NewTicker(portPollInterval)
+	defer ticker.Stop()
+
+	for {
+		if m.quitting.Load() {
+			return
+		}
+		m.refreshPorts()
+		<-ticker.C
+	}
+}
+
+// refreshPorts scans once and publishes only what changed — a service's ports
+// are the same on almost every poll, and an event per service per tick would be
+// noise on every connected client.
+func (m *Manager) refreshPorts() {
+	views := make([]ServiceView, len(m.Services))
+	pgids := make([]int, 0, len(m.Services))
+	for i, svc := range m.Services {
+		views[i] = svc.View()
+		if views[i].PGID > 0 {
+			pgids = append(pgids, views[i].PGID)
+		}
+	}
+
+	byPGID := ports.Listening(pgids)
+
+	for i, svc := range m.Services {
+		var found []Port
+		// Only while the service is actually up: a port on a card means you can
+		// reach the service there, and that has to stay true for declared ports
+		// as much as discovered ones.
+		if views[i].PGID > 0 {
+			found = mergePorts(byPGID[views[i].PGID], svc.Config.Exposes)
+		}
+		if svc.SetPorts(found) {
+			m.send(PortsMsg{Index: i, Ports: found})
+		}
+	}
+}
+
+// mergePorts combines discovered and declared ports into one sorted, deduped
+// list. Declared ports add to what was found rather than replacing it: hiding a
+// port the service is genuinely listening on would be a lie, and the point of
+// declaring is to cover what discovery cannot see.
+//
+// Labels come only from the config, and are applied to discovered ports too —
+// declaring `["api", 40200]` names the port whether or not discovery also finds
+// it, so you can label the ones you care about without listing them all.
+func mergePorts(discovered []int, declared config.ExposeList) []Port {
+	labels := make(map[int]string, len(declared))
+	for _, e := range declared {
+		if e.Port > 0 && e.Label != "" {
+			labels[e.Port] = e.Label
+		}
+	}
+
+	seen := make(map[int]bool, len(discovered)+len(declared))
+	out := make([]Port, 0, len(discovered)+len(declared))
+	add := func(number int) {
+		if number <= 0 || seen[number] {
+			return
+		}
+		seen[number] = true
+		out = append(out, Port{Number: number, Label: labels[number]})
+	}
+	for _, p := range discovered {
+		add(p)
+	}
+	for _, e := range declared {
+		add(e.Port)
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i].Number < out[j].Number })
+	return out
 }
 
 // ClearLogs discards a service's history — the on-disk log and the in-memory
@@ -560,6 +709,9 @@ func (m *Manager) startServiceLocked(idx int) []tea.Msg {
 
 	// Session marker so adopted/tailed logs are readable across pairin restarts.
 	fmt.Fprintf(logF, "\n--- pairin session started %s ---\n", time.Now().Format(time.RFC3339))
+	for _, w := range svc.configWarnings {
+		fmt.Fprintf(logF, "[pairin] %s\n", w)
+	}
 
 	cmd := exec.Command("sh", "-c", svc.Config.Cmd)
 	cmd.Dir = svc.Config.Dir
@@ -1066,6 +1218,19 @@ type HealthCheckMsg struct {
 // view holding a copy of it should drop that too.
 type LogsClearedMsg struct {
 	Index int
+}
+
+// Port is a TCP port a service is reachable on, with an optional label from the
+// config. The kernel knows only numbers; labels say what answers there.
+type Port struct {
+	Number int
+	Label  string
+}
+
+// PortsMsg reports the TCP ports a service is listening on.
+type PortsMsg struct {
+	Index int
+	Ports []Port
 }
 
 // checkTCP dials a TCP address with a 1-second timeout.
