@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -1465,5 +1466,38 @@ func TestMergePortsDeduplicates(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("mergePorts = %v, want %v", got, want)
 		}
+	}
+}
+
+// A config warning has to reach the on-disk log, not just the in-memory ring
+// buffer: a TUI attaching later preloads from the file and only sees events
+// after that, so a ring-buffer-only warning is invisible to everyone who wasn't
+// already attached when the supervisor started.
+func TestConfigWarningsReachTheServiceLog(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	cfg := &config.Config{
+		Path:     filepath.Join(tmpDir, ".pairinrc.toml"),
+		Services: []config.Service{{Name: "web", Dir: tmpDir, Cmd: "echo hi"}},
+		Warnings: []config.Warning{
+			{Service: "web", Message: `ignoring exposes entry: "minio" has no port number in it`},
+			{Service: "nonexistent", Message: "dropped on the floor"},
+		},
+	}
+	m := NewManager(cfg)
+
+	m.startService(0)
+	defer m.StopAll()
+	time.Sleep(200 * time.Millisecond)
+
+	data, err := os.ReadFile(m.Services[0].LogFile)
+	if err != nil {
+		t.Fatalf("reading log: %v", err)
+	}
+	if !strings.Contains(string(data), `[pairin] ignoring exposes entry: "minio"`) {
+		t.Errorf("warning missing from %s:\n%s", m.Services[0].LogFile, data)
+	}
+	if strings.Contains(string(data), "dropped on the floor") {
+		t.Error("a warning for another service ended up in web's log")
 	}
 }

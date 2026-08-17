@@ -189,6 +189,21 @@ exposes = [["db", 5432], ["redis", 6379]]
 exposes = [{label = "db", port = 5432}]
 ```
 
+The string form doesn't care about order or separator — `"db:5432"`, `":5432 db"`, `"db=5432"`,
+`"5432 db"` and `"db/5432"` all mean the same thing. Whatever's a number is the port; the rest is the
+label.
+
+A port pairin can't read is **dropped with a warning, not an error**. It's a label on a dashboard, so
+a typo in one has no business stopping your project from starting:
+
+```
+$ pairin
+pairin: stack: ignoring exposes entry: "redis" has no port number in it
+```
+
+The same warning is written to that service's log, so it's still there if you started detached or
+came back to it later.
+
 Declared ports are shown **alongside** anything discovered, deduplicated and sorted — they add to
 what was found rather than replacing it, since hiding a port a service is genuinely listening on
 would be a lie. Labels apply to discovered ports too, so declaring `"api:40200"` names that port

@@ -303,6 +303,23 @@ but the bare form shipped first and a config that worked yesterday has to keep w
 what people actually reach for. Labels are truncated to `maxPortLabel` when rendered, for the reason
 the whole detail line is bounded — column width is sized to fit it.
 
+The string form is parsed by splitting on `: = , /` and whitespace and taking the single number as
+the port, rather than by matching one syntax. People write `":40111 minio"` and `"minio=9000"` and
+mean the obvious thing, and there is no reading under which either is ambiguous. Two numbers is the
+one case that genuinely is, and it's refused.
+
+**`UnmarshalTOML` never returns an error.** An entry it can't read is kept as `Exposed{Raw, Err}` for
+`Validate` to turn into a `Config.Warning` and drop. This matters more than it looks: a decode error
+fails `config.Load`, which stops the whole project — so before this, one typo in a decorative field
+took twenty working services down with it. Warnings go to stderr on `pairin up` and are written into
+the affected service's log when it starts. The log, not the in-memory ring buffer: a TUI attaching
+later preloads from disk and only sees events after that, so a ring-buffer-only warning is invisible
+to everyone who didn't happen to be attached at supervisor startup.
+
+Genuine structural errors — an unknown restart policy, a dependency that doesn't exist, a cycle —
+still fail the load. The line is whether pairin can run the config as written: it can run one with an
+unreadable port label, and can't run one with a missing dependency.
+
 On the wire, `control.Port` has a custom `UnmarshalJSON` that also accepts a bare number. Ports went
 out as plain integers before labels existed, and a supervisor started with that build keeps sending
 them for as long as it runs; without this a newer dashboard would fail to decode a snapshot from a

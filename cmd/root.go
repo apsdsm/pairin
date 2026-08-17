@@ -122,6 +122,15 @@ func withCommandHint(cmd *cobra.Command, arg string, err error) error {
 	return err
 }
 
+// reportWarnings prints survivable config problems to stderr. They also reach
+// the affected service's log, but a line here means you see it at the moment
+// you start the project rather than having to go looking.
+func reportWarnings(cfg *config.Config) {
+	for _, w := range cfg.Warnings {
+		fmt.Fprintf(os.Stderr, "pairin: %s: %s\n", w.Service, w.Message)
+	}
+}
+
 // autoRegister adds the project to the catalog so it can be started by name
 // later. Best-effort: a catalog problem must not stop services from starting.
 func autoRegister(cfg *config.Config) {
@@ -155,6 +164,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
+	reportWarnings(cfg)
 	autoRegister(cfg)
 
 	// Case 1: supervisor already running.

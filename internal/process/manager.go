@@ -119,6 +119,10 @@ type Service struct {
 	// cannot be restarted in phase 1.
 	Adopted bool
 
+	// configWarnings are survivable config problems, written into the log each
+	// time the service starts.
+	configWarnings []string
+
 	cmd          *exec.Cmd
 	generation   int
 	healthCancel context.CancelFunc
@@ -321,6 +325,17 @@ func NewManager(cfg *config.Config) *Manager {
 		}
 		nameToIdx[sc.Name] = i
 	}
+
+	// Config warnings are held until the service starts, then written into its
+	// log file — which is where someone would look to find out why a service
+	// isn't behaving as they wrote it, and unlike the in-memory buffer it
+	// survives for a TUI that attaches later.
+	for _, w := range cfg.Warnings {
+		if i, ok := nameToIdx[w.Service]; ok {
+			services[i].configWarnings = append(services[i].configWarnings, w.Message)
+		}
+	}
+
 	return &Manager{
 		Services:   services,
 		configPath: cfg.Path,
@@ -694,6 +709,9 @@ func (m *Manager) startServiceLocked(idx int) []tea.Msg {
 
 	// Session marker so adopted/tailed logs are readable across pairin restarts.
 	fmt.Fprintf(logF, "\n--- pairin session started %s ---\n", time.Now().Format(time.RFC3339))
+	for _, w := range svc.configWarnings {
+		fmt.Fprintf(logF, "[pairin] %s\n", w)
+	}
 
 	cmd := exec.Command("sh", "-c", svc.Config.Cmd)
 	cmd.Dir = svc.Config.Dir

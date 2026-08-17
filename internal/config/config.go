@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/BurntSushi/toml"
 )
@@ -18,6 +19,19 @@ type Config struct {
 	// Path is the absolute path of the .pairinrc.toml that was loaded.
 	// Populated by Load; not parsed from TOML.
 	Path string `toml:"-"`
+
+	// Warnings are problems that were survivable — a port declaration that
+	// couldn't be read, say. They are surfaced rather than raised, because
+	// failing to load a config stops a whole project, and a decorative field
+	// has no business doing that.
+	Warnings []Warning `toml:"-"`
+}
+
+// Warning is something worth telling the user about a service, that isn't
+// worth refusing to start over.
+type Warning struct {
+	Service string
+	Message string
 }
 
 type Project struct {
@@ -48,6 +62,11 @@ type Service struct {
 type Exposed struct {
 	Label string
 	Port  int
+
+	// Raw and Err describe an entry that couldn't be read. Such entries are
+	// dropped at load with a warning rather than failing the config.
+	Raw string
+	Err string
 }
 
 // ExposeList is a service's declared ports.
@@ -62,17 +81,26 @@ type ExposeList []Exposed
 //
 // The bare form is accepted because it shipped first, and a config that worked
 // yesterday has to keep working.
+//
+// **It never returns an error.** Entries it can't read are kept with their
+// original text and a reason, for Config.Validate to turn into warnings and
+// drop. Ports are decoration on a dashboard; a typo in one must not stop a
+// project from starting, which is what happens when a config fails to load.
 func (l *ExposeList) UnmarshalTOML(data any) error {
 	items, ok := data.([]any)
 	if !ok {
-		return fmt.Errorf("exposes must be a list, got %T", data)
+		*l = ExposeList{{
+			Raw: fmt.Sprintf("%v", data),
+			Err: fmt.Sprintf("exposes must be a list of ports, got %T", data),
+		}}
+		return nil
 	}
 
 	out := make(ExposeList, 0, len(items))
 	for _, item := range items {
 		e, err := parseExposed(item)
 		if err != nil {
-			return err
+			e = Exposed{Raw: fmt.Sprintf("%v", item), Err: err.Error()}
 		}
 		out = append(out, e)
 	}
@@ -126,18 +154,38 @@ func parseExposed(item any) (Exposed, error) {
 	}
 }
 
-// parseExposedString reads "5432" or "db:5432".
+// parseExposedString reads a port and an optional label, in whichever order and
+// with whichever separator someone reached for:
+//
+//	"5432"  "db:5432"  ":40111 minio"  "9000 minio"  "minio=9000"  "40111:minio"
+//
+// Rather than imposing one syntax, it splits on the punctuation people use and
+// takes the single number as the port; whatever else is left is the label. The
+// only genuine ambiguity is two numbers, which it refuses.
 func parseExposedString(s string) (Exposed, error) {
-	s = strings.TrimSpace(s)
-	label, num := "", s
-	if i := strings.LastIndex(s, ":"); i >= 0 {
-		label, num = strings.TrimSpace(s[:i]), strings.TrimSpace(s[i+1:])
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ':' || r == '=' || r == ',' || r == '/' || unicode.IsSpace(r)
+	})
+
+	var e Exposed
+	var label []string
+	seen := false
+	for _, f := range fields {
+		if n, err := strconv.Atoi(f); err == nil {
+			if seen {
+				return Exposed{}, fmt.Errorf("%q has more than one number, so which is the port is unclear", s)
+			}
+			e.Port, seen = n, true
+			continue
+		}
+		label = append(label, f)
 	}
-	port, err := strconv.Atoi(num)
-	if err != nil {
-		return Exposed{}, fmt.Errorf("exposes entry %q is not a port or \"label:port\"", s)
+
+	if !seen {
+		return Exposed{}, fmt.Errorf("%q has no port number in it", s)
 	}
-	return Exposed{Label: label, Port: port}, nil
+	e.Label = strings.Join(label, " ")
+	return e, nil
 }
 
 // ParsedRestartDelay returns the restart delay as a time.Duration.
@@ -213,6 +261,11 @@ func LoadFrom(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// warn records a survivable problem against a service.
+func (cfg *Config) warn(service, message string) {
+	cfg.Warnings = append(cfg.Warnings, Warning{Service: service, Message: message})
+}
+
 // Validate checks that dependency references are valid and acyclic.
 func (cfg *Config) Validate() error {
 	nameSet := make(map[string]int, len(cfg.Services))
@@ -220,7 +273,8 @@ func (cfg *Config) Validate() error {
 		nameSet[svc.Name] = i
 	}
 
-	for _, svc := range cfg.Services {
+	for si := range cfg.Services {
+		svc := &cfg.Services[si]
 		for _, dep := range svc.DependsOn {
 			depIdx, exists := nameSet[dep]
 			if !exists {
@@ -248,11 +302,20 @@ func (cfg *Config) Validate() error {
 			return fmt.Errorf("service %q has negative max_restarts %d", svc.Name, svc.MaxRestarts)
 		}
 
+		// Bad port declarations are dropped with a warning rather than failing
+		// the config: a typo in a display field must not stop the project.
+		kept := make(ExposeList, 0, len(svc.Exposes))
 		for _, e := range svc.Exposes {
-			if e.Port < 1 || e.Port > 65535 {
-				return fmt.Errorf("service %q exposes port %d, which is not a valid TCP port", svc.Name, e.Port)
+			switch {
+			case e.Err != "":
+				cfg.warn(svc.Name, "ignoring exposes entry: "+e.Err)
+			case e.Port < 1 || e.Port > 65535:
+				cfg.warn(svc.Name, fmt.Sprintf("ignoring exposes entry: %d is not a valid TCP port", e.Port))
+			default:
+				kept = append(kept, e)
 			}
 		}
+		svc.Exposes = kept
 	}
 
 	// Detect circular dependencies using Kahn's algorithm
